@@ -41,6 +41,7 @@ class Evidence(BaseModel):
     identity: str
     status_code: int | None
     body: str = Field(max_length=_BODY_LIMIT)
+    label: str = ""
 
 
 class TestResult(BaseModel):
