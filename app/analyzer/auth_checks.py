@@ -46,6 +46,7 @@ class RouteFinding(BaseModel):
     reason: str
     confidence: _Confidence
     line_numbers: list[int]
+    source: str = ""
 
 
 def assess_routes(directory: str | Path) -> list[RouteFinding]:
@@ -93,6 +94,7 @@ def _assess_route(
         reason=reason,
         confidence=confidence,
         line_numbers=sorted(signals.lines),
+        source=route.source,
     )
 
 
