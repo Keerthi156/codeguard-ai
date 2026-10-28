@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from typing import Literal, Sequence
 
+from app.ai.model_run import ModelRun
 from app.analyzer.auth_checks import RouteFinding
 from app.schemas import AuthorizationMatrix, Decision, Resource, TestCase, TestPlan
 
@@ -40,6 +41,19 @@ class MockProvider:
                         _case(method, route, resource, identity, "non-owner", rules.non_owner.expected)
                     )
         return TestPlan(cases=cases)
+
+    def model_run(self) -> ModelRun:
+        """Mock planning does not call a model."""
+        return ModelRun(
+            provider="mock",
+            model_name="",
+            calls=0,
+            proposed=0,
+            accepted=0,
+            rejected=0,
+            total_tokens=None,
+            latency_ms=0,
+        )
 
 
 def _case(

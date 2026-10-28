@@ -4,13 +4,20 @@ from __future__ import annotations
 
 import json
 import logging
+import socket
+import sqlite3
+from pathlib import Path
 
 import httpx
 import pytest
 
 from app.ai.factory import get_provider
 from app.ai.llm_provider import LLMProvider
+from app.ai.mock_provider import MockProvider
 from app.ai.provider import Provider
+from app.analyzer.auth_checks import assess_routes
+from app.cli import main
+from app.target_config import load_target_config
 from app.analyzer.auth_checks import RouteFinding
 from app.config import Settings
 from app.schemas import AuthorizationMatrix, Resource, TestPlan, User, default_owner_only_matrix
@@ -230,6 +237,58 @@ def test_factory_builds_the_model_provider_or_names_missing_settings() -> None:
             )
         )
     assert _KEY not in str(raised.value)
+
+
+def test_scan_summary_names_the_provider(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    root = Path(__file__).resolve().parents[1]
+    source = (root / "fixtures" / "codeguard.vulnerable.yaml").read_text(encoding="utf-8")
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+    config_path = tmp_path / "codeguard.yaml"
+    config_path.write_text(source.replace("http://127.0.0.1:8001", f"http://127.0.0.1:{port}"), encoding="utf-8")
+    loaded = load_target_config(config_path)
+    findings = assess_routes(root / "fixtures" / "vulnerable_api")
+    plan = MockProvider().plan_tests(findings, loaded.matrix())
+    seen: list[httpx.Request] = []
+    provider = LLMProvider(_settings(), transport=_transport([_ok(plan.model_dump_json())], seen))
+    monkeypatch.setattr("app.cli.get_provider", lambda: provider)
+    database = tmp_path / "codeguard.db"
+
+    code = main(["scan", "--config", str(config_path), "--db", str(database), "--no-start"])
+    captured = capsys.readouterr()
+
+    assert code == 0
+    assert captured.out.index("findings,") < captured.out.index("Model run")
+    assert "Provider: llm" in captured.out
+    assert "Model: muse-spark-1.3" in captured.out
+    assert "Calls: 1" in captured.out
+    assert f"Proposed: {len(plan.cases)}" in captured.out
+    assert f"Accepted: {len(plan.cases)}" in captured.out
+    assert "Rejected: 0" in captured.out
+    assert "Tokens: 7" in captured.out
+    assert _KEY not in captured.out
+    assert _REASONING not in captured.out
+    assert _KEY not in captured.err
+    with sqlite3.connect(database) as connection:
+        row = connection.execute(
+            """
+            SELECT provider, model_name, model_calls, tests_proposed, tests_accepted,
+                   tests_rejected, total_tokens, model_summary
+            FROM scan_runs
+            """
+        ).fetchone()
+    assert row is not None
+    assert row[0] == "llm"
+    assert row[1] == "muse-spark-1.3"
+    assert row[2] == 1
+    assert row[3] == len(plan.cases)
+    assert row[4] == len(plan.cases)
+    assert row[5] == 0
+    assert row[6] == 7
+    assert row[7] in captured.out
+    assert _KEY not in row[7]
+    assert _REASONING not in row[7]
 
 
 def test_provider_accepts_a_json_list() -> None:
