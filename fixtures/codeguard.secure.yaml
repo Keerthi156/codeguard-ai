@@ -1,6 +1,8 @@
 # Ownership-enforcing fixture. Local testing only.
 # Policy: only the owner can read or modify their document.
 base_url: http://127.0.0.1:8002
+target_app: fixtures.secure_api.app:app
+source_dir: fixtures/secure_api
 users:
   - name: alice
     token: alice-token

@@ -1,6 +1,8 @@
 # Intentionally vulnerable fixture. Local testing only.
 # Policy: only the owner can read or modify their document.
 base_url: http://127.0.0.1:8001
+target_app: fixtures.vulnerable_api.app:app
+source_dir: fixtures/vulnerable_api
 users:
   - name: alice
     token: alice-token

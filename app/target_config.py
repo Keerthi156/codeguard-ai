@@ -7,6 +7,7 @@ rules come from the owner-only authorization matrix.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Literal, Self
 from urllib.parse import urlsplit
@@ -17,6 +18,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from app.schemas import AuthorizationMatrix, Resource, User, default_owner_only_matrix
 
 _ALLOWED_HOSTS = frozenset({"127.0.0.1", "localhost"})
+_APP_TARGET = re.compile(r"^[A-Za-z_][\w]*(\.[A-Za-z_][\w]*)*:[A-Za-z_][\w]*$")
 HttpMethod = Literal["GET", "POST", "PUT", "PATCH", "DELETE"]
 Operation = Literal["read", "write"]
 
@@ -50,11 +52,41 @@ class TargetConfig(BaseModel):
     users: list[User] = Field(min_length=1)
     resources: list[Resource] = Field(min_length=1)
     routes: list[TargetRoute] = Field(min_length=1)
+    target_app: str | None = None
+    source_dir: str | None = None
 
     @field_validator("base_url")
     @classmethod
     def localhost_only(cls, value: str) -> str:
         return _normalize_base_url(value)
+
+    @field_validator("target_app", "source_dir", mode="before")
+    @classmethod
+    def blank_optional(cls, value: object) -> object:
+        if value is None:
+            return None
+        if isinstance(value, str):
+            stripped = value.strip()
+            return stripped or None
+        return value
+
+    @field_validator("target_app")
+    @classmethod
+    def app_import_path(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if _APP_TARGET.fullmatch(value) is None:
+            raise ValueError("target_app must be a module:attribute import path")
+        return value
+
+    @field_validator("source_dir")
+    @classmethod
+    def local_source_dir(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if "://" in value or value.startswith("//"):
+            raise ValueError("source_dir must be a local directory")
+        return value
 
     @model_validator(mode="after")
     def reject_unknown_owners(self) -> Self:
