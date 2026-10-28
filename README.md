@@ -15,4 +15,5 @@ Copy-Item .env.example .env
 
 ### Unreleased
 
+- Day 2: AST route analyzer, authorization heuristics, authorization matrix and target config, provider interface with mock, plan validator.
 - Repository layout, environment config, and package skeleton.
