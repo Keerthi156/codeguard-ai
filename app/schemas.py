@@ -1,0 +1,85 @@
+"""Authorization policy for a local target."""
+
+from __future__ import annotations
+
+from typing import Literal, Self
+
+from pydantic import BaseModel, Field, field_validator, model_validator
+
+Decision = Literal["allow", "deny"]
+
+
+class User(BaseModel):
+    """A synthetic caller. ``name`` is what resource owners refer to."""
+
+    name: str = Field(min_length=1)
+    token: str = Field(min_length=1)
+
+
+class Resource(BaseModel):
+    """An object id and the user who owns it."""
+
+    id: str = Field(min_length=1)
+    owner: str = Field(min_length=1)
+
+    @field_validator("id", mode="before")
+    @classmethod
+    def stringify_id(cls, value: object) -> object:
+        if isinstance(value, int) and not isinstance(value, bool):
+            return str(value)
+        return value
+
+
+class AccessRule(BaseModel):
+    """Expected result for one operation under one caller condition."""
+
+    expected: Decision
+
+
+class OperationRules(BaseModel):
+    """Allow or deny for the owner, another user, and an anonymous caller."""
+
+    owner: AccessRule
+    non_owner: AccessRule
+    unauthenticated: AccessRule
+
+
+class AuthorizationMatrix(BaseModel):
+    """Users, the resources they own, and the expected access rules."""
+
+    users: list[User] = Field(default_factory=list)
+    resources: list[Resource] = Field(default_factory=list)
+    read: OperationRules
+    write: OperationRules
+
+    @model_validator(mode="after")
+    def owners_are_known_users(self) -> Self:
+        names = [user.name for user in self.users]
+        if len(names) != len(set(names)):
+            raise ValueError("user names must be unique")
+        known = set(names)
+        seen_ids: set[str] = set()
+        for resource in self.resources:
+            if resource.id in seen_ids:
+                raise ValueError(f"duplicate resource id {resource.id}")
+            seen_ids.add(resource.id)
+            if resource.owner not in known:
+                raise ValueError(f"resource {resource.id} is owned by unknown user {resource.owner!r}")
+        return self
+
+
+def _owner_only() -> OperationRules:
+    return OperationRules(
+        owner=AccessRule(expected="allow"),
+        non_owner=AccessRule(expected="deny"),
+        unauthenticated=AccessRule(expected="deny"),
+    )
+
+
+def default_owner_only_matrix() -> AuthorizationMatrix:
+    """Only the owner can read or modify their resource.
+
+    Other authenticated users and unauthenticated callers are denied for both
+    operations. The returned matrix has no users or resources yet.
+    """
+    return AuthorizationMatrix(read=_owner_only(), write=_owner_only())
