@@ -116,17 +116,19 @@ def _scan(config_path: str, *, start_server: bool, db_path: str) -> int:
     route_findings = assess_routes(source_dir)
     provider = get_provider()
     try:
-        plan = provider.plan_tests(route_findings, config.matrix())
+        plan = provider.plan_tests(route_findings, config.matrix(), routes=routes, config=config)
     except RuntimeError as exc:
-        raise _UsageError(str(exc)) from exc
+        _print_model_run(provider.model_run(), tokens)
+        raise _UsageError(_redact(str(exc), tokens)) from exc
     validated = validate_plan(plan, routes, config.matrix(), config)
     model_run = provider.model_run().with_counts(
-        proposed=len(plan.cases),
+        proposed=_proposed_count(plan),
         accepted=len(validated.accepted),
         rejected=len(validated.rejected),
     )
     if validated.rejected:
         detail = "; ".join(f"{item.id}: {', '.join(item.reasons)}" for item in validated.rejected)
+        _print_model_run(model_run, tokens)
         raise _UsageError(_redact(f"validation error: {detail}", tokens))
 
     started: _StartedTarget | None = None
@@ -273,6 +275,10 @@ def _print_report(findings: Sequence[Finding], tokens: Sequence[str], model_run:
     print(_redact(_table(prepared), tokens))
     confirmed = sum(1 for finding in findings if finding.status == "Confirmed")
     print(_redact(f"{len(findings)} findings, {confirmed} confirmed", tokens))
+    _print_model_run(model_run, tokens)
+
+
+def _print_model_run(model_run: ModelRun, tokens: Sequence[str]) -> None:
     print(_redact(model_run.text(), tokens))
 
 
@@ -304,6 +310,13 @@ def _clip(text: str, limit: int) -> str:
     if len(compact) <= limit:
         return compact
     return compact[: limit - 3] + "..."
+
+
+def _proposed_count(plan: object) -> int:
+    cases = getattr(plan, "cases", None)
+    if isinstance(plan, dict):
+        cases = plan.get("cases")
+    return len(cases) if isinstance(cases, list) else 0
 
 
 def _redact(text: str, tokens: Sequence[str]) -> str:

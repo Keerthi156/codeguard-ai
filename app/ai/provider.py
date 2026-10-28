@@ -15,7 +15,14 @@ from app.schemas import AuthorizationMatrix, TestPlan
 
 @runtime_checkable
 class Provider(Protocol):
-    def plan_tests(self, findings: Sequence[RouteFinding], matrix: AuthorizationMatrix) -> TestPlan:
+    def plan_tests(
+        self,
+        findings: Sequence[RouteFinding],
+        matrix: AuthorizationMatrix,
+        *,
+        routes: Sequence[object] | None = None,
+        config: object | None = None,
+    ) -> TestPlan:
         """Draft access checks from static findings and the authorization matrix."""
 
     def model_run(self) -> ModelRun:

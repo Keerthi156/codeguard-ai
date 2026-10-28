@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, replace
 
 
@@ -17,9 +18,19 @@ class ModelRun:
     rejected: int
     total_tokens: int | None
     latency_ms: int
+    tool_trace: tuple[tuple[str, str, int], ...] = ()
+    tool_mode: str = ""
+    plan_submissions: int = 0
 
     def with_counts(self, *, proposed: int, accepted: int, rejected: int) -> ModelRun:
         return replace(self, proposed=proposed, accepted=accepted, rejected=rejected)
+
+    def trace_json(self) -> str:
+        """Tool name, argument summary, and turn. No reasoning text and no keys."""
+        return json.dumps(
+            [{"tool": name, "args": args, "turn": turn} for name, args, turn in self.tool_trace],
+            separators=(",", ":"),
+        )
 
     def text(self) -> str:
         if self.provider == "mock":
@@ -39,5 +50,27 @@ class ModelRun:
                 f"Rejected: {self.rejected}",
                 f"Tokens: {tokens}",
                 f"Latency: {self.latency_ms} ms",
+                f"Tool mode: {self.tool_mode or '-'}",
+                _tools_line(self.tool_trace),
+                f"Plan submissions: {self.plan_submissions}",
             )
         )
+
+
+def _tools_line(trace: tuple[tuple[str, str, int], ...]) -> str:
+    if not trace:
+        return "Tools: -"
+    parts: list[str] = []
+    current = ""
+    count = 0
+    for name, _args, _turn in trace:
+        if name == current:
+            count += 1
+            continue
+        if current:
+            parts.append(current if count == 1 else f"{current} x{count}")
+        current = name
+        count = 1
+    if current:
+        parts.append(current if count == 1 else f"{current} x{count}")
+    return "Tools: " + ", ".join(parts)
