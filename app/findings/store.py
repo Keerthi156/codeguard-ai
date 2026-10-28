@@ -35,7 +35,8 @@ CREATE TABLE IF NOT EXISTS scan_runs (
     tests_rejected INTEGER NOT NULL DEFAULT 0,
     total_tokens INTEGER,
     latency_ms INTEGER NOT NULL DEFAULT 0,
-    model_summary TEXT NOT NULL DEFAULT ''
+    model_summary TEXT NOT NULL DEFAULT '',
+    tool_trace TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS findings (
@@ -109,8 +110,8 @@ class FindingStore:
                 INSERT INTO scan_runs (
                     created_at, target_revision, provider, model_name, model_calls,
                     tests_proposed, tests_accepted, tests_rejected, total_tokens,
-                    latency_ms, model_summary
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    latency_ms, model_summary, tool_trace
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     _iso(created_at),
@@ -124,6 +125,7 @@ class FindingStore:
                     None if model_run is None else model_run.total_tokens,
                     0 if model_run is None else model_run.latency_ms,
                     summary,
+                    "[]" if model_run is None else model_run.trace_json(),
                 ),
             )
             run_id = int(cursor.lastrowid or 0)
@@ -278,6 +280,7 @@ def _ensure_scan_columns(connection: sqlite3.Connection) -> None:
         ("total_tokens", "INTEGER"),
         ("latency_ms", "INTEGER NOT NULL DEFAULT 0"),
         ("model_summary", "TEXT NOT NULL DEFAULT ''"),
+        ("tool_trace", "TEXT NOT NULL DEFAULT ''"),
     )
     for name, declaration in additions:
         if name not in existing:

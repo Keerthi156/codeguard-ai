@@ -14,7 +14,11 @@ from app.config import Settings, load_settings
 
 
 def get_provider(settings: Settings | None = None) -> Provider:
-    """Return the development mock, or the configured model provider."""
+    """Return the development mock, or the configured model provider.
+
+    A model failure is not replaced with the mock. The mock is used only when
+    USE_MOCK_AI is true.
+    """
     active = settings if settings is not None else load_settings()
     if active.use_mock_ai:
         return MockProvider()

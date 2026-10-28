@@ -22,7 +22,15 @@ _FIXTURE_ROUTES: tuple[tuple[_Method, str], ...] = (
 class MockProvider:
     """Deterministic planner for local fixture development."""
 
-    def plan_tests(self, findings: Sequence[RouteFinding], matrix: AuthorizationMatrix) -> TestPlan:
+    def plan_tests(
+        self,
+        findings: Sequence[RouteFinding],
+        matrix: AuthorizationMatrix,
+        *,
+        routes: Sequence[object] | None = None,
+        config: object | None = None,
+    ) -> TestPlan:
+        del routes, config
         present = {(finding.method.upper(), finding.path) for finding in findings}
         cases: list[TestCase] = []
         for method, route in _FIXTURE_ROUTES:
