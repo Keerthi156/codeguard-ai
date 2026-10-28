@@ -11,7 +11,7 @@ import re
 import sqlite3
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from app.findings.classifier import Finding
@@ -70,41 +70,30 @@ class FindingStore:
 
     def save_finding(self, finding: Finding, results: Sequence[TestResult] = ()) -> int:
         """Insert a scan run, the finding, and sanitized evidence. Returns the run id."""
-        evidence_rows = _evidence_rows(finding, results)
         with self._connect() as connection:
             cursor = connection.execute(
                 "INSERT INTO scan_runs (created_at, target_revision) VALUES (?, ?)",
                 (_iso(finding.created_at), finding.target_revision),
             )
             run_id = int(cursor.lastrowid or 0)
-            connection.execute(
-                """
-                INSERT INTO findings (
-                    id, scan_run_id, route, method, status, reason,
-                    source_lines, created_at, target_revision
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    finding.id,
-                    run_id,
-                    finding.route,
-                    finding.method,
-                    finding.status,
-                    finding.reason,
-                    json.dumps(finding.source_lines),
-                    _iso(finding.created_at),
-                    finding.target_revision,
-                ),
+            _insert_finding(connection, run_id, finding, results)
+            connection.commit()
+        return run_id
+
+    def save_scan(self, findings: Sequence[Finding], results: Sequence[TestResult] = ()) -> int:
+        """Insert one scan run and every finding, storing sanitized evidence only."""
+        created_at = findings[0].created_at if findings else datetime.now(timezone.utc)
+        revision = findings[0].target_revision if findings else None
+        with self._connect() as connection:
+            cursor = connection.execute(
+                "INSERT INTO scan_runs (created_at, target_revision) VALUES (?, ?)",
+                (_iso(created_at), revision),
             )
-            connection.executemany(
-                """
-                INSERT INTO test_results (
-                    finding_id, test_id, status_code, access, matches_expected,
-                    outcome, method, path, identity, body
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                evidence_rows,
-            )
+            run_id = int(cursor.lastrowid or 0)
+            for finding in findings:
+                connection.execute("DELETE FROM test_results WHERE finding_id = ?", (finding.id,))
+                connection.execute("DELETE FROM findings WHERE id = ?", (finding.id,))
+                _insert_finding(connection, run_id, finding, results)
             connection.commit()
         return run_id
 
@@ -160,6 +149,42 @@ class FindingStore:
             yield connection
         finally:
             connection.close()
+
+
+def _insert_finding(
+    connection: sqlite3.Connection,
+    run_id: int,
+    finding: Finding,
+    results: Sequence[TestResult],
+) -> None:
+    connection.execute(
+        """
+        INSERT INTO findings (
+            id, scan_run_id, route, method, status, reason,
+            source_lines, created_at, target_revision
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            finding.id,
+            run_id,
+            finding.route,
+            finding.method,
+            finding.status,
+            finding.reason,
+            json.dumps(finding.source_lines),
+            _iso(finding.created_at),
+            finding.target_revision,
+        ),
+    )
+    connection.executemany(
+        """
+        INSERT INTO test_results (
+            finding_id, test_id, status_code, access, matches_expected,
+            outcome, method, path, identity, body
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        _evidence_rows(finding, results),
+    )
 
 
 def _evidence_rows(finding: Finding, results: Sequence[TestResult]) -> list[tuple[object, ...]]:

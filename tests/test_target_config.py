@@ -46,6 +46,11 @@ def test_valid_config_loads(filename: str, base_url: str) -> None:
     defaults = default_owner_only_matrix()
 
     assert config.base_url == base_url
+    expected_target = {
+        "codeguard.vulnerable.yaml": ("fixtures.vulnerable_api.app:app", "fixtures/vulnerable_api"),
+        "codeguard.secure.yaml": ("fixtures.secure_api.app:app", "fixtures/secure_api"),
+    }[filename]
+    assert (config.target_app, config.source_dir) == expected_target
     assert [(user.name, user.token) for user in config.users] == [
         ("alice", "alice-token"),
         ("bob", "bob-token"),
