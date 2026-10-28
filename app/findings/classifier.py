@@ -31,6 +31,8 @@ FindingStatus = Literal[
 _UNAUTHENTICATED = frozenset({"unauthenticated", "anonymous"})
 _READ_METHODS = frozenset({"GET", "HEAD"})
 _PLACEHOLDER = re.compile(r"\{[A-Za-z_][A-Za-z0-9_]*\}")
+_OWNER_FIELD = re.compile(r'"owner"\s*:\s*"([^"]*)"')
+_LABEL_RANK = {"EXPLOIT": 0, "CONTROL": 1, "DENIED": 2, "FAILED": 3, "INCONCLUSIVE": 4, "CHECK": 5}
 
 
 class Finding(BaseModel):
@@ -82,7 +84,7 @@ def classify(
                 method=group.method,
                 status=status,
                 reason=reason,
-                evidence=[_redact(result.evidence, tokens) for result in matched],
+                evidence=_ordered_evidence(group, matched, matrix, tokens),
                 source_lines=sorted(set(group.source_lines)),
                 created_at=created_at,
                 target_revision=revision,
@@ -216,6 +218,76 @@ def _is_server_error(status_code: int | None) -> bool:
 def _finding_id(method: str, route: str) -> str:
     slug = re.sub(r"[^a-z0-9]+", "-", route.lower()).strip("-")
     return f"{method.lower()}-{slug or 'route'}"
+
+
+def evidence_line(item: Evidence) -> str:
+    """One labeled evidence line. The body snippet stays truncated."""
+    status = "-" if item.status_code is None else str(item.status_code)
+    head = f"{item.method} {item.path} as {item.identity} -> {status}"
+    base = f"{item.label}: {head}" if item.label else head
+    if item.label == "EXPLOIT":
+        owner = _body_owner(item.body)
+        if owner:
+            return f"{base}, body shows owner {owner}"
+        snippet = _snippet(item.body)
+        return f"{base}, body {snippet}" if snippet else base
+    if item.label == "CONTROL":
+        return f"{base} (owner access works)"
+    if item.label == "DENIED":
+        return f"{base} (access denied)"
+    snippet = _snippet(item.body)
+    return f"{base}, body {snippet}" if snippet else base
+
+
+def _ordered_evidence(
+    group: _RouteGroup,
+    results: Sequence[TestResult],
+    matrix: AuthorizationMatrix,
+    tokens: list[str],
+) -> list[Evidence]:
+    ranked: list[tuple[str, int, int, Evidence]] = []
+    for index, result in enumerate(results):
+        label = _evidence_label(group, result, matrix)
+        evidence = _redact(result.evidence, tokens).model_copy(update={"label": label})
+        ranked.append((result.evidence.path, _LABEL_RANK[label], index, evidence))
+    ranked.sort(key=lambda item: (item[0], item[1], item[2]))
+    return [item[3] for item in ranked]
+
+
+def _evidence_label(group: _RouteGroup, result: TestResult, matrix: AuthorizationMatrix) -> str:
+    if result.outcome == "inconclusive" or result.access is None or _is_server_error(result.status_code):
+        return "INCONCLUSIVE"
+    resource = _resource_for_path(group.route, result.evidence.path, matrix.resources)
+    if resource is None:
+        return "CHECK"
+    users = {user.name for user in matrix.users}
+    condition = _condition(result.evidence.identity, resource.owner, users)
+    if condition is None:
+        return "CHECK"
+    rules = matrix.read if group.method in _READ_METHODS else matrix.write
+    required = getattr(rules, condition).expected
+    if condition in {"non_owner", "unauthenticated"} and required == "deny" and result.access == "allowed":
+        return "EXPLOIT"
+    if condition == "owner" and required == "allow":
+        return "CONTROL" if result.access == "allowed" and result.outcome == "pass" else "FAILED"
+    if condition in {"non_owner", "unauthenticated"} and required == "deny" and result.access == "denied":
+        return "DENIED"
+    return "CHECK"
+
+
+def _body_owner(body: str) -> str | None:
+    match = _OWNER_FIELD.search(body)
+    if match is None:
+        return None
+    owner = match.group(1).strip()
+    return owner or None
+
+
+def _snippet(body: str, limit: int = 80) -> str:
+    compact = " ".join(body.split())
+    if len(compact) <= limit:
+        return compact
+    return compact[: limit - 3] + "..."
 
 
 def _redact(evidence: Evidence, tokens: list[str]) -> Evidence:

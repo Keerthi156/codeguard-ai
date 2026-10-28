@@ -10,6 +10,8 @@ from pathlib import Path
 import pytest
 
 from app.cli import main
+from app.findings.classifier import evidence_line
+from app.findings.store import FindingStore
 
 ROOT = Path(__file__).resolve().parents[1]
 _TOKENS = ("alice-token", "bob-token")
@@ -54,6 +56,10 @@ def test_vulnerable_scan_reports_confirmed_findings(mock_ai: None, tmp_path: Pat
         line = _finding_line(captured.out, method)
         assert "/documents/{id}" in line
         assert "Confirmed" in line
+        exploit = f"EXPLOIT: {method} /documents/101 as bob -> 200, body shows owner alice"
+        control = f"CONTROL: {method} /documents/101 as alice -> 200 (owner access works)"
+        assert exploit in line
+        assert captured.out.index(exploit) < captured.out.index(control)
     assert "2 findings, 2 confirmed" in captured.out
     _assert_no_tokens(captured.out, captured.err)
     with sqlite3.connect(database) as connection:
@@ -63,6 +69,13 @@ def test_vulnerable_scan_reports_confirmed_findings(mock_ai: None, tmp_path: Pat
         runs = connection.execute("SELECT COUNT(*) FROM scan_runs").fetchone()
     assert rows == [("GET", "/documents/{id}", "Confirmed"), ("PUT", "/documents/{id}", "Confirmed")]
     assert runs == (1,)
+    store = FindingStore(database)
+    for method, finding_id in (("GET", "get-documents-id"), ("PUT", "put-documents-id")):
+        loaded = store.load_finding(finding_id)
+        first = evidence_line(loaded.evidence[0])
+        assert first == f"EXPLOIT: {method} /documents/101 as bob -> 200, body shows owner alice"
+        assert loaded.evidence[0].identity == "bob"
+        assert len(loaded.evidence[0].body) <= 300
     stored = database.read_bytes()
     for token in _TOKENS:
         assert token.encode() not in stored

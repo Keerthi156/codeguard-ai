@@ -28,7 +28,7 @@ from app.ai.factory import get_provider
 from app.ai.validator import validate_plan
 from app.analyzer.auth_checks import assess_routes
 from app.analyzer.routes import discover_routes
-from app.findings.classifier import Finding, classify
+from app.findings.classifier import Finding, classify, evidence_line
 from app.findings.store import DEFAULT_DB_PATH, FindingStore
 from app.runner.executor import execute_plan
 from app.target_config import TargetConfig, load_target_config
@@ -254,51 +254,41 @@ def _wait_until_ready(base_url: str, started: _StartedTarget) -> None:
 
 
 def _print_report(findings: Sequence[Finding], tokens: Sequence[str]) -> None:
-    rows = [
+    prepared = [
         (
             f"{finding.method} {finding.route}",
             finding.status,
             _clip(finding.reason, 70),
-            _short_evidence(finding),
+            [evidence_line(item) for item in finding.evidence] or ["-"],
         )
         for finding in findings
     ]
-    print(_redact(_table(("route", "status", "reason", "evidence"), rows), tokens))
+    print(_redact(_table(prepared), tokens))
     confirmed = sum(1 for finding in findings if finding.status == "Confirmed")
     print(_redact(f"{len(findings)} findings, {confirmed} confirmed", tokens))
 
 
-def _short_evidence(finding: Finding) -> str:
-    if not finding.evidence:
-        return "-"
-    chosen = next(
-        (
-            item
-            for item in finding.evidence
-            if item.status_code is not None and 200 <= item.status_code < 300
-        ),
-        finding.evidence[0],
-    )
-    status = "-" if chosen.status_code is None else str(chosen.status_code)
-    body = _clip(chosen.body, 40)
-    return f"{chosen.method} {chosen.path} {chosen.identity} {status} {body}".strip()
-
-
-def _table(headers: tuple[str, str, str, str], rows: Sequence[tuple[str, str, str, str]]) -> str:
+def _table(rows: Sequence[tuple[str, str, str, list[str]]]) -> str:
+    headers = ("route", "status", "reason", "evidence")
     widths = [len(header) for header in headers]
-    for row in rows:
-        for index, cell in enumerate(row):
-            widths[index] = max(widths[index], len(cell))
+    for route, status, reason, lines in rows:
+        widths[0] = max(widths[0], len(route))
+        widths[1] = max(widths[1], len(status))
+        widths[2] = max(widths[2], len(reason))
+        widths[3] = max(widths[3], len(lines[0]))
 
-    def format_row(row: Sequence[str]) -> str:
-        return "  ".join(cell.ljust(widths[index]) for index, cell in enumerate(row)).rstrip()
+    def format_row(cells: Sequence[str]) -> str:
+        return "  ".join(cell.ljust(widths[index]) for index, cell in enumerate(cells)).rstrip()
 
-    lines = [format_row(headers), format_row(tuple("-" * width for width in widths))]
-    if rows:
-        lines.extend(format_row(row) for row in rows)
-    else:
-        lines.append("(no findings)")
-    return "\n".join(lines)
+    output = [format_row(headers), format_row(tuple("-" * width for width in widths))]
+    if not rows:
+        output.append("(no findings)")
+        return "\n".join(output)
+    indent = " " * (widths[0] + widths[1] + widths[2] + 6)
+    for route, status, reason, lines in rows:
+        output.append(format_row((route, status, reason, lines[0])))
+        output.extend(f"{indent}{line}" for line in lines[1:])
+    return "\n".join(output)
 
 
 def _clip(text: str, limit: int) -> str:

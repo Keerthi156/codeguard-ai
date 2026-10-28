@@ -12,7 +12,7 @@ import fixtures.secure_api.app as secure_api
 import fixtures.vulnerable_api.app as vulnerable_api
 from app.ai.mock_provider import MockProvider
 from app.analyzer.auth_checks import RouteFinding, assess_routes
-from app.findings.classifier import classify
+from app.findings.classifier import classify, evidence_line
 from app.runner.executor import TestResult, execute_plan
 from app.schemas import Resource, User, default_owner_only_matrix
 from app.target_config import load_target_config
@@ -57,6 +57,15 @@ async def test_vulnerable_routes_are_confirmed() -> None:
         assert finding.route == "/documents/{id}"
         assert finding.status == "Confirmed"
         assert finding.evidence
+        exploit = evidence_line(finding.evidence[0])
+        assert exploit == (
+            f"EXPLOIT: {finding.method} /documents/101 as bob -> 200, body shows owner alice"
+        )
+        assert evidence_line(finding.evidence[1]) == (
+            f"CONTROL: {finding.method} /documents/101 as alice -> 200 (owner access works)"
+        )
+        assert finding.evidence[0].identity == "bob"
+        assert len(finding.evidence[0].body) <= 300
         assert finding.source_lines
         assert finding.created_at.tzinfo is not None
         assert finding.target_revision is None or re.fullmatch(r"[0-9a-f]{7,64}", finding.target_revision)

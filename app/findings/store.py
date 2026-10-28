@@ -53,6 +53,7 @@ CREATE TABLE IF NOT EXISTS test_results (
     path TEXT NOT NULL,
     identity TEXT NOT NULL,
     body TEXT NOT NULL,
+    label TEXT NOT NULL DEFAULT '',
     FOREIGN KEY (finding_id) REFERENCES findings(id)
 );
 """
@@ -66,6 +67,7 @@ class FindingStore:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as connection:
             connection.executescript(_SCHEMA)
+            _ensure_label_column(connection)
             connection.commit()
 
     def save_finding(self, finding: Finding, results: Sequence[TestResult] = ()) -> int:
@@ -112,7 +114,7 @@ class FindingStore:
                 raise KeyError(finding_id)
             evidence_rows = connection.execute(
                 """
-                SELECT method, path, identity, status_code, body
+                SELECT method, path, identity, status_code, body, label
                 FROM test_results
                 WHERE finding_id = ?
                 ORDER BY id
@@ -132,6 +134,7 @@ class FindingStore:
                     identity=item["identity"],
                     status_code=item["status_code"],
                     body=_sanitize_body(item["body"]),
+                    label=item["label"] or "",
                 )
                 for item in evidence_rows
             ],
@@ -180,46 +183,74 @@ def _insert_finding(
         """
         INSERT INTO test_results (
             finding_id, test_id, status_code, access, matches_expected,
-            outcome, method, path, identity, body
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            outcome, method, path, identity, body, label
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         _evidence_rows(finding, results),
     )
 
 
 def _evidence_rows(finding: Finding, results: Sequence[TestResult]) -> list[tuple[object, ...]]:
-    selected = [result for result in results if _result_matches(result, finding)]
-    if selected:
-        return [
-            (
-                finding.id,
-                result.test_id,
-                result.status_code,
-                result.access,
-                _flag(result.matches_expected),
-                result.outcome,
-                result.evidence.method,
-                result.evidence.path,
-                result.evidence.identity,
-                _sanitize_body(result.evidence.body),
+    if finding.evidence:
+        used: set[int] = set()
+        rows: list[tuple[object, ...]] = []
+        for index, item in enumerate(finding.evidence, start=1):
+            matched = _match_result(item, results, used)
+            rows.append(
+                (
+                    finding.id,
+                    matched.test_id if matched is not None else f"{finding.id}-evidence-{index}",
+                    item.status_code,
+                    None if matched is None else matched.access,
+                    None if matched is None else _flag(matched.matches_expected),
+                    None if matched is None else matched.outcome,
+                    item.method,
+                    item.path,
+                    item.identity,
+                    _sanitize_body(item.body),
+                    item.label,
+                )
             )
-            for result in selected
-        ]
+        return rows
     return [
         (
             finding.id,
-            f"{finding.id}-evidence-{index}",
-            item.status_code,
-            None,
-            None,
-            None,
-            item.method,
-            item.path,
-            item.identity,
-            _sanitize_body(item.body),
+            result.test_id,
+            result.status_code,
+            result.access,
+            _flag(result.matches_expected),
+            result.outcome,
+            result.evidence.method,
+            result.evidence.path,
+            result.evidence.identity,
+            _sanitize_body(result.evidence.body),
+            result.evidence.label,
         )
-        for index, item in enumerate(finding.evidence, start=1)
+        for result in results
+        if _result_matches(result, finding)
     ]
+
+
+def _ensure_label_column(connection: sqlite3.Connection) -> None:
+    columns = {row[1] for row in connection.execute("PRAGMA table_info(test_results)")}
+    if "label" not in columns:
+        connection.execute("ALTER TABLE test_results ADD COLUMN label TEXT NOT NULL DEFAULT ''")
+
+
+def _match_result(item: Evidence, results: Sequence[TestResult], used: set[int]) -> TestResult | None:
+    for index, result in enumerate(results):
+        if index in used:
+            continue
+        evidence = result.evidence
+        if (
+            evidence.method == item.method
+            and evidence.path == item.path
+            and evidence.identity == item.identity
+            and evidence.status_code == item.status_code
+        ):
+            used.add(index)
+            return result
+    return None
 
 
 def _result_matches(result: TestResult, finding: Finding) -> bool:
