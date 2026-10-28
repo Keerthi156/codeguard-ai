@@ -65,6 +65,15 @@ def test_process_environment_overrides_dotenv(
     assert settings.model_name == "from-process"
 
 
+def test_settings_display_hides_api_key(clear_model_env: None, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MODEL_API_KEY", "fake-secret-key-9f3a")
+
+    settings = load_settings()
+
+    assert "fake-secret-key-9f3a" not in repr(settings)
+    assert "fake-secret-key-9f3a" not in str(settings)
+
+
 def test_rejects_invalid_mock_flag(clear_model_env: None, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("USE_MOCK_AI", "maybe")
 

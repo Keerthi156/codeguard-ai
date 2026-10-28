@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -26,7 +26,7 @@ def _env_flag(name: str, default: bool) -> bool:
 
 @dataclass(frozen=True)
 class Settings:
-    model_api_key: str
+    model_api_key: str = field(repr=False)
     model_name: str
     model_base_url: str
     use_mock_ai: bool
