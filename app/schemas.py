@@ -4,9 +4,10 @@ from __future__ import annotations
 
 from typing import Literal, Self
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 Decision = Literal["allow", "deny"]
+HttpMethod = Literal["GET", "POST", "PUT", "PATCH", "DELETE"]
 
 
 class User(BaseModel):
@@ -83,3 +84,34 @@ def default_owner_only_matrix() -> AuthorizationMatrix:
     operations. The returned matrix has no users or resources yet.
     """
     return AuthorizationMatrix(read=_owner_only(), write=_owner_only())
+
+
+class TestCase(BaseModel):
+    """One planned request. This is data for a later runner, not an executable command."""
+
+    __test__ = False
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(min_length=1)
+    route: str = Field(min_length=1)
+    method: HttpMethod
+    identity: str = Field(min_length=1)
+    resource_id: str = Field(min_length=1)
+    expected: Decision
+    reason: str = Field(min_length=1)
+
+
+class TestPlan(BaseModel):
+    """A set of planned access checks."""
+
+    __test__ = False
+    model_config = ConfigDict(extra="forbid")
+
+    cases: list[TestCase]
+
+    @model_validator(mode="after")
+    def case_ids_are_unique(self) -> Self:
+        ids = [case.id for case in self.cases]
+        if len(ids) != len(set(ids)):
+            raise ValueError("test case ids must be unique")
+        return self
