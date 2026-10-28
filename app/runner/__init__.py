@@ -1,0 +1,1 @@
+"""Allowlisted localhost request execution."""

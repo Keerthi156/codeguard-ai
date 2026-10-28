@@ -1,0 +1,23 @@
+﻿---
+description: CodeGuard AI project rules
+alwaysApply: true
+---
+Project: CodeGuard AI. A security agent that finds, proves, fixes and verifies Broken Object Level Authorization (BOLA) bugs in FastAPI apps. Built solo for the Meta Global AI Developer Hackathon (Indie track). All code must be written fresh during the event.
+
+Stack: Python 3.11, FastAPI, pytest, HTTPX, Pydantic, SQLite. Developer is on Windows with PowerShell; give exact PowerShell commands.
+
+Non-negotiable rules:
+1. Analyze target source statically (ast); never import or execute it during route discovery.
+2. AI never produces commands or code that the runner executes directly.
+3. Validate every AI test plan against known routes, users, resources, policy, and the configured target.
+4. Only send requests to allowlisted localhost targets using synthetic data.
+5. Redact tokens and sensitive data from logs and stored evidence.
+6. Never edit the original repo automatically; patches go to a temporary copy after human approval.
+7. A finding is Confirmed only with reproducible unauthorized access plus a passing owner control test. A fix is Verified only if the exploit is blocked AND owner access still works AND baseline tests pass.
+8. Timeouts, crashes and 5xx are Inconclusive, never Confirmed.
+9. Never fabricate benchmark numbers. No Streamlit. The UI is one small HTML report page.
+10. The real Meta model (muse-spark-1.3) is central; a mock provider is for development only.
+
+Statuses: Suspected, Confirmed, Fix proposed, Verification failed, Verified, Inconclusive.
+
+Working protocol: inspect existing files first, do only the requested task, add tests, run them, never weaken a test to get green, explain failures by root cause, keep code small and typed.
