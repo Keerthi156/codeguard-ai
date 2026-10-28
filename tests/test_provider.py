@@ -78,5 +78,5 @@ def test_factory_uses_mock_only_for_development() -> None:
     assert isinstance(provider, Provider)
 
     disabled = Settings(model_api_key="", model_name="", model_base_url="", use_mock_ai=False)
-    with pytest.raises(RuntimeError, match="development only"):
+    with pytest.raises(RuntimeError, match="MODEL_API_KEY"):
         get_provider(disabled)
