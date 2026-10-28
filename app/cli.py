@@ -84,7 +84,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         code = exc.code
         return code if isinstance(code, int) else 2
     try:
-        return _scan(args.config, start_server=not args.no_start, db_path=args.db)
+        return _scan(
+            args.config,
+            start_server=not args.no_start,
+            db_path=args.db,
+            canned_patch=bool(getattr(args, "canned_patch", False)),
+        )
     except _UsageError as exc:
         print(_redact(str(exc), ()), file=sys.stderr)
         return 2
@@ -104,10 +109,15 @@ def _parser() -> argparse.ArgumentParser:
         help="use the server already listening on the configured localhost base_url",
     )
     scan.add_argument("--db", default=str(DEFAULT_DB_PATH), help="SQLite database path")
+    scan.add_argument(
+        "--canned-patch",
+        action="store_true",
+        help="propose a labeled CannedPatch owner check for the document fixtures; does not call the model",
+    )
     return parser
 
 
-def _scan(config_path: str, *, start_server: bool, db_path: str) -> int:
+def _scan(config_path: str, *, start_server: bool, db_path: str, canned_patch: bool = False) -> int:
     config = _load_config(config_path)
     tokens = [user.token for user in config.users]
     _assert_localhost(config.base_url)
@@ -147,8 +157,58 @@ def _scan(config_path: str, *, start_server: bool, db_path: str) -> int:
             started.stop()
 
     _print_report(findings, tokens, model_run)
+    if canned_patch:
+        _print_canned_patches(findings, route_findings, source_dir, config.matrix(), tokens)
     confirmed = sum(1 for finding in findings if finding.status == "Confirmed")
     return 1 if confirmed else 0
+
+
+def _print_canned_patches(
+    findings: Sequence[Finding],
+    route_findings: Sequence[object],
+    source_dir: Path,
+    matrix: object,
+    tokens: Sequence[str],
+) -> None:
+    from app.analyzer.auth_checks import RouteFinding
+    from app.remediation.patcher import PatchRejected, propose_patch, route_for
+    from app.schemas import AuthorizationMatrix
+
+    if not isinstance(matrix, AuthorizationMatrix):
+        raise _UsageError("canned patch: authorization matrix is missing")
+    routes = [item for item in route_findings if isinstance(item, RouteFinding)]
+    for finding in findings:
+        if finding.status != "Confirmed":
+            continue
+        route = route_for(finding, routes)
+        if route is None:
+            raise _UsageError(f"canned patch: no handler for {finding.method} {finding.route}")
+        try:
+            proposal = propose_patch(
+                finding,
+                source_dir=source_dir,
+                route_file=route.file,
+                handler_source=route.source,
+                line_numbers=route.line_numbers,
+                matrix=matrix,
+                canned=True,
+            )
+        except PatchRejected as exc:
+            raise _UsageError(f"canned patch: {exc}") from exc
+        print(
+            _redact(
+                "\n".join(
+                    (
+                        f"{proposal.status} [{proposal.root_cause.split(':', 1)[0]}]",
+                        f"finding: {proposal.finding_id}",
+                        f"file: {proposal.file}",
+                        f"temp copy: {proposal.temp_copy_path}",
+                        proposal.root_cause,
+                    )
+                ),
+                tokens,
+            )
+        )
 
 
 def _load_config(config_path: str) -> TargetConfig:
