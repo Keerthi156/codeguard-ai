@@ -25,6 +25,7 @@ import yaml
 from pydantic import ValidationError
 
 from app.ai.factory import get_provider
+from app.ai.model_run import ModelRun
 from app.ai.validator import validate_plan
 from app.analyzer.auth_checks import assess_routes
 from app.analyzer.routes import discover_routes
@@ -113,11 +114,17 @@ def _scan(config_path: str, *, start_server: bool, db_path: str) -> int:
     source_dir = _source_directory(config, Path(config_path))
     routes = discover_routes(source_dir)
     route_findings = assess_routes(source_dir)
+    provider = get_provider()
     try:
-        plan = get_provider().plan_tests(route_findings, config.matrix())
+        plan = provider.plan_tests(route_findings, config.matrix())
     except RuntimeError as exc:
         raise _UsageError(str(exc)) from exc
     validated = validate_plan(plan, routes, config.matrix(), config)
+    model_run = provider.model_run().with_counts(
+        proposed=len(plan.cases),
+        accepted=len(validated.accepted),
+        rejected=len(validated.rejected),
+    )
     if validated.rejected:
         detail = "; ".join(f"{item.id}: {', '.join(item.reasons)}" for item in validated.rejected)
         raise _UsageError(_redact(f"validation error: {detail}", tokens))
@@ -128,7 +135,7 @@ def _scan(config_path: str, *, start_server: bool, db_path: str) -> int:
             started = _start_target(config, source_dir, tokens)
         results = asyncio.run(execute_plan(validated.accepted, config))
         findings = classify(route_findings, results, config.matrix())
-        FindingStore(db_path).save_scan(findings, results)
+        FindingStore(db_path).save_scan(findings, results, model_run)
     except _UsageError:
         raise
     except ValueError as exc:
@@ -137,7 +144,7 @@ def _scan(config_path: str, *, start_server: bool, db_path: str) -> int:
         if started is not None:
             started.stop()
 
-    _print_report(findings, tokens)
+    _print_report(findings, tokens, model_run)
     confirmed = sum(1 for finding in findings if finding.status == "Confirmed")
     return 1 if confirmed else 0
 
@@ -253,7 +260,7 @@ def _wait_until_ready(base_url: str, started: _StartedTarget) -> None:
     raise _UsageError("target app did not become ready")
 
 
-def _print_report(findings: Sequence[Finding], tokens: Sequence[str]) -> None:
+def _print_report(findings: Sequence[Finding], tokens: Sequence[str], model_run: ModelRun) -> None:
     prepared = [
         (
             f"{finding.method} {finding.route}",
@@ -266,6 +273,7 @@ def _print_report(findings: Sequence[Finding], tokens: Sequence[str]) -> None:
     print(_redact(_table(prepared), tokens))
     confirmed = sum(1 for finding in findings if finding.status == "Confirmed")
     print(_redact(f"{len(findings)} findings, {confirmed} confirmed", tokens))
+    print(_redact(model_run.text(), tokens))
 
 
 def _table(rows: Sequence[tuple[str, str, str, list[str]]]) -> str:

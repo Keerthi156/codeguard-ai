@@ -15,6 +15,7 @@ from collections.abc import Sequence
 import httpx
 from pydantic import ValidationError
 
+from app.ai.model_run import ModelRun
 from app.analyzer.auth_checks import RouteFinding
 from app.config import Settings
 from app.schemas import AuthorizationMatrix, OperationRules, TestPlan
@@ -58,10 +59,14 @@ class LLMProvider:
         self._transport = transport
         self._request_cap = request_cap
         self._requests = 0
+        self._latency_ms = 0
+        self._total_tokens: int | None = None
 
     def plan_tests(self, findings: Sequence[RouteFinding], matrix: AuthorizationMatrix) -> TestPlan:
         """Ask the model for access checks of the suspected routes only."""
         self._requests = 0
+        self._latency_ms = 0
+        self._total_tokens = None
         suspected = [finding for finding in findings if finding.status == "Suspected"]
         if not suspected:
             return TestPlan(cases=[])
@@ -82,6 +87,19 @@ class LLMProvider:
             except _PlanError as second:
                 raise RuntimeError(f"model plan was rejected: {second}") from None
 
+    def model_run(self) -> ModelRun:
+        """Counts for the latest plan. The API key is not included."""
+        return ModelRun(
+            provider="llm",
+            model_name=self._settings.model_name,
+            calls=self._requests,
+            proposed=0,
+            accepted=0,
+            rejected=0,
+            total_tokens=self._total_tokens,
+            latency_ms=self._latency_ms,
+        )
+
     def _call_model(self, messages: list[dict[str, str]]) -> str:
         """POST one chat completion and return the answer text."""
         url = f"{self._settings.model_base_url.rstrip('/')}/chat/completions"
@@ -97,11 +115,14 @@ class LLMProvider:
                 with httpx.Client(transport=self._transport, timeout=_TIMEOUT_SECONDS, trust_env=False) as client:
                     response = client.post(url, headers=headers, json=body, follow_redirects=False)
             except httpx.TimeoutException:
+                self._latency_ms += _elapsed_ms(started)
                 last_error = "model request timed out"
                 continue
             except httpx.HTTPError:
+                self._latency_ms += _elapsed_ms(started)
                 raise RuntimeError("model request failed") from None
-            latency_ms = int((time.perf_counter() - started) * 1000)
+            latency_ms = _elapsed_ms(started)
+            self._latency_ms += latency_ms
             if response.status_code >= 500:
                 last_error = f"model request failed with status {response.status_code}"
                 _log_call(self._settings.model_name, latency_ms, None)
@@ -112,13 +133,21 @@ class LLMProvider:
                 payload = response.json()
             except json.JSONDecodeError:
                 raise RuntimeError("model response was not JSON") from None
-            _log_call(
-                self._settings.model_name,
-                latency_ms,
-                payload.get("usage") if isinstance(payload, dict) else None,
-            )
+            usage = payload.get("usage") if isinstance(payload, dict) else None
+            self._record_tokens(usage)
+            _log_call(self._settings.model_name, latency_ms, usage)
             return _redact_key(_message_content(payload), self._settings.model_api_key)
         raise RuntimeError(last_error)
+
+    def _record_tokens(self, usage: object) -> None:
+        _prompt_tokens, _completion_tokens, total = _usage(usage)
+        if total is None:
+            return
+        self._total_tokens = total if self._total_tokens is None else self._total_tokens + total
+
+
+def _elapsed_ms(started: float) -> int:
+    return int((time.perf_counter() - started) * 1000)
 
 
 def _message_content(payload: object) -> str:

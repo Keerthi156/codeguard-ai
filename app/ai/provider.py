@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from typing import Protocol, Sequence, runtime_checkable
 
+from app.ai.model_run import ModelRun
 from app.analyzer.auth_checks import RouteFinding
 from app.schemas import AuthorizationMatrix, TestPlan
 
@@ -16,3 +17,6 @@ from app.schemas import AuthorizationMatrix, TestPlan
 class Provider(Protocol):
     def plan_tests(self, findings: Sequence[RouteFinding], matrix: AuthorizationMatrix) -> TestPlan:
         """Draft access checks from static findings and the authorization matrix."""
+
+    def model_run(self) -> ModelRun:
+        """Describe the provider call that produced the latest plan."""

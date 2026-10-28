@@ -14,6 +14,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
+from app.ai.model_run import ModelRun
 from app.findings.classifier import Finding
 from app.runner.executor import Evidence, TestResult
 
@@ -25,7 +26,16 @@ _SCHEMA = """
 CREATE TABLE IF NOT EXISTS scan_runs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     created_at TEXT NOT NULL,
-    target_revision TEXT
+    target_revision TEXT,
+    provider TEXT NOT NULL DEFAULT '',
+    model_name TEXT NOT NULL DEFAULT '',
+    model_calls INTEGER NOT NULL DEFAULT 0,
+    tests_proposed INTEGER NOT NULL DEFAULT 0,
+    tests_accepted INTEGER NOT NULL DEFAULT 0,
+    tests_rejected INTEGER NOT NULL DEFAULT 0,
+    total_tokens INTEGER,
+    latency_ms INTEGER NOT NULL DEFAULT 0,
+    model_summary TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS findings (
@@ -68,6 +78,7 @@ class FindingStore:
         with self._connect() as connection:
             connection.executescript(_SCHEMA)
             _ensure_label_column(connection)
+            _ensure_scan_columns(connection)
             connection.commit()
 
     def save_finding(self, finding: Finding, results: Sequence[TestResult] = ()) -> int:
@@ -82,14 +93,38 @@ class FindingStore:
             connection.commit()
         return run_id
 
-    def save_scan(self, findings: Sequence[Finding], results: Sequence[TestResult] = ()) -> int:
+    def save_scan(
+        self,
+        findings: Sequence[Finding],
+        results: Sequence[TestResult] = (),
+        model_run: ModelRun | None = None,
+    ) -> int:
         """Insert one scan run and every finding, storing sanitized evidence only."""
         created_at = findings[0].created_at if findings else datetime.now(timezone.utc)
         revision = findings[0].target_revision if findings else None
+        summary = "" if model_run is None else model_run.text()
         with self._connect() as connection:
             cursor = connection.execute(
-                "INSERT INTO scan_runs (created_at, target_revision) VALUES (?, ?)",
-                (_iso(created_at), revision),
+                """
+                INSERT INTO scan_runs (
+                    created_at, target_revision, provider, model_name, model_calls,
+                    tests_proposed, tests_accepted, tests_rejected, total_tokens,
+                    latency_ms, model_summary
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    _iso(created_at),
+                    revision,
+                    "" if model_run is None else model_run.provider,
+                    "" if model_run is None else model_run.model_name,
+                    0 if model_run is None else model_run.calls,
+                    0 if model_run is None else model_run.proposed,
+                    0 if model_run is None else model_run.accepted,
+                    0 if model_run is None else model_run.rejected,
+                    None if model_run is None else model_run.total_tokens,
+                    0 if model_run is None else model_run.latency_ms,
+                    summary,
+                ),
             )
             run_id = int(cursor.lastrowid or 0)
             for finding in findings:
@@ -229,6 +264,24 @@ def _evidence_rows(finding: Finding, results: Sequence[TestResult]) -> list[tupl
         for result in results
         if _result_matches(result, finding)
     ]
+
+
+def _ensure_scan_columns(connection: sqlite3.Connection) -> None:
+    existing = {row[1] for row in connection.execute("PRAGMA table_info(scan_runs)")}
+    additions = (
+        ("provider", "TEXT NOT NULL DEFAULT ''"),
+        ("model_name", "TEXT NOT NULL DEFAULT ''"),
+        ("model_calls", "INTEGER NOT NULL DEFAULT 0"),
+        ("tests_proposed", "INTEGER NOT NULL DEFAULT 0"),
+        ("tests_accepted", "INTEGER NOT NULL DEFAULT 0"),
+        ("tests_rejected", "INTEGER NOT NULL DEFAULT 0"),
+        ("total_tokens", "INTEGER"),
+        ("latency_ms", "INTEGER NOT NULL DEFAULT 0"),
+        ("model_summary", "TEXT NOT NULL DEFAULT ''"),
+    )
+    for name, declaration in additions:
+        if name not in existing:
+            connection.execute(f"ALTER TABLE scan_runs ADD COLUMN {name} {declaration}")
 
 
 def _ensure_label_column(connection: sqlite3.Connection) -> None:
