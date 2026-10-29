@@ -47,6 +47,10 @@ class PatchRejected(Exception):
     """The proposed edit failed a safety check and was not written."""
 
 
+class _NotJson(PatchRejected):
+    """The model reply was not valid JSON. One immediate retry is allowed."""
+
+
 class PatchProposal(BaseModel):
     """A fix written only under a temporary copy of the source directory."""
 
@@ -184,35 +188,46 @@ def _ask_model(
     if missing:
         raise RuntimeError("model settings are missing: " + ", ".join(missing))
     url = f"{settings.model_base_url.rstrip('/')}/chat/completions"
-    body = {
-        "model": settings.model_name,
-        "messages": [
-            {"role": "system", "content": _system_prompt()},
-            {
-                "role": "user",
-                "content": json.dumps(
-                    _request_view(finding, relative, handler_source, line_numbers, matrix, feedback),
-                    sort_keys=True,
-                ),
-            },
-        ],
-        "max_tokens": _MAX_TOKENS,
-        "tools": [_patch_tool()],
-        "tool_choice": "auto",
-    }
     headers = {"Authorization": f"Bearer {settings.model_api_key}"}
-    try:
-        with httpx.Client(transport=transport, timeout=_TIMEOUT_SECONDS, trust_env=False) as client:
-            response = client.post(url, headers=headers, json=body, follow_redirects=False)
-    except httpx.HTTPError:
-        raise RuntimeError("model request failed") from None
-    if response.status_code != 200:
-        raise RuntimeError(f"model request failed with status {response.status_code}")
-    try:
-        payload = response.json()
-    except json.JSONDecodeError:
-        raise PatchRejected("model fix was not JSON") from None
-    return _patch_payload(payload, settings.model_api_key)
+    note = feedback
+    last_error = _NotJson("model fix was not JSON")
+    for parse_try in range(2):
+        body = {
+            "model": settings.model_name,
+            "messages": [
+                {"role": "system", "content": _system_prompt()},
+                {
+                    "role": "user",
+                    "content": json.dumps(
+                        _request_view(finding, relative, handler_source, line_numbers, matrix, note),
+                        sort_keys=True,
+                    ),
+                },
+            ],
+            "max_tokens": _MAX_TOKENS,
+            "tools": [_patch_tool()],
+            "tool_choice": "auto",
+        }
+        try:
+            with httpx.Client(transport=transport, timeout=_TIMEOUT_SECONDS, trust_env=False) as client:
+                response = client.post(url, headers=headers, json=body, follow_redirects=False)
+        except httpx.HTTPError:
+            raise RuntimeError("model request failed") from None
+        if response.status_code != 200:
+            raise RuntimeError(f"model request failed with status {response.status_code}")
+        try:
+            payload = response.json()
+        except json.JSONDecodeError as exc:
+            last_error = _NotJson(f"model fix was not JSON: {exc.msg}")
+        else:
+            try:
+                return _patch_payload(payload, settings.model_api_key)
+            except _NotJson as exc:
+                last_error = exc
+        if parse_try == 1:
+            raise last_error
+        note = _with_parse_error(feedback, str(last_error))
+    raise last_error
 
 
 def _validate_and_apply(
@@ -503,8 +518,8 @@ def _object_from_text(text: str) -> dict[str, object]:
     stripped = _FENCE.sub("", text.strip()).strip()
     try:
         data = json.loads(stripped)
-    except json.JSONDecodeError:
-        raise PatchRejected("model fix was not JSON") from None
+    except json.JSONDecodeError as exc:
+        raise _NotJson(f"model fix was not JSON: {exc.msg}") from None
     if isinstance(data, dict) and set(data) == {"tool", "args"} and data.get("tool") == "submit_patch":
         args = data.get("args")
         if isinstance(args, dict):
@@ -523,6 +538,14 @@ def _message(payload: object) -> dict[str, object]:
         return {}
     message = choices[0].get("message")
     return message if isinstance(message, dict) else {}
+
+
+def _with_parse_error(feedback: str | None, error: str) -> str:
+    """Append the parse error and ask for JSON only. This retry is not a new repair."""
+    extra = f"{error}\nreturn only the JSON object, no prose, no markdown"
+    if feedback:
+        return f"{feedback}\n{extra}"
+    return extra
 
 
 def _request_view(

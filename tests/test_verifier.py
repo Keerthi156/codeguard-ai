@@ -97,6 +97,42 @@ def _payloads(scripts: dict[str, list[dict[str, object]]]) -> httpx.MockTranspor
     return httpx.MockTransport(handler)
 
 
+def _scripted(scripts: dict[str, list[object]], seen: list[str]) -> httpx.MockTransport:
+    """Return prose or a JSON edit. A string item is sent as the model content."""
+    cursors = {method: 0 for method in scripts}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content.decode())
+        content = body["messages"][1]["content"]
+        seen.append(content)
+        message = json.loads(content)
+        method = str(message["method"])
+        queue = scripts[method]
+        index = min(cursors[method], len(queue) - 1)
+        cursors[method] += 1
+        item = queue[index]
+        text = item if isinstance(item, str) else json.dumps(item)
+        return httpx.Response(200, json={"choices": [{"message": {"role": "assistant", "content": text}}]})
+
+    return httpx.MockTransport(handler)
+
+
+def _history_line(text: str, marker: str) -> str:
+    for line in text.splitlines():
+        if line.startswith("Attempt ") and marker in line:
+            return line
+    raise AssertionError(marker)
+
+
+def _block_after(text: str, history: str) -> str:
+    rest = text[text.index(history) + len(history) :]
+    block = rest[rest.index("Finding:") :]
+    next_history = block.find("\nAttempt ")
+    if next_history != -1:
+        block = block[:next_history]
+    return block
+
+
 def _original() -> str:
     return (SOURCE / "app.py").read_text(encoding="utf-8")
 
@@ -317,8 +353,10 @@ def test_canned_patch_is_verified(
     assert "0 allowed (OK)" in captured.out
     assert "all allowed (OK)" in captured.out
     assert "0 non-owner allowed" in captured.out
-    assert "VERIFIED: exploit blocked, owner access works, regression clean" in captured.out
-    assert captured.out.count("Bypass check: 14 variants, 0 bypasses (HARDENED)") == 2
+    collapsed = " ".join(captured.out.split())
+    assert collapsed.count(
+        "VERIFIED and HARDENED: exploit blocked, owner access works, regression clean, 14 bypass variants blocked"
+    ) == 2
     assert " as bob:" not in captured.out
     assert all(len(line) <= 100 for line in captured.out.splitlines() if line.startswith(("Finding:", "exploit", "owner control", "regression", "VERIFIED", "check")))
     _assert_original_unchanged(before)
@@ -555,7 +593,7 @@ def test_missing_old_text_is_repaired_on_attempt_2(
     captured = capsys.readouterr()
 
     assert code == 0
-    assert "Attempt 1: rejected (old text not found) -> Attempt 2: VERIFIED" in captured.out
+    assert "Attempt 1: rejected (old text not found) | Attempt 2: VERIFIED and HARDENED" in captured.out
     assert "private-chain-of-thought-9c1e" not in captured.out
     assert "CannedPatch" not in captured.out
     _assert_original_unchanged(before)
@@ -649,6 +687,117 @@ def test_three_bad_edits_end_as_verification_failed(
     assert {row[2] for row in rows if row[0] == 3} == {"Verification failed"}
 
 
+def test_malformed_json_then_a_valid_reply_does_not_consume_an_attempt(
+    mock_ai: None,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    use_server("asgi", monkeypatch)
+    before = _snapshot(SOURCE)
+    original = _original()
+    database = tmp_path / "codeguard.db"
+    seen: list[str] = []
+    scripts = {
+        "GET": ["this is prose, not json", _owner_edit(original, "GET")],
+        "PUT": ["this is prose, not json", _owner_edit(original, "PUT")],
+    }
+    code = run_fix(
+        str(_config(tmp_path)),
+        db_path=database,
+        approve=lambda _proposal: True,
+        settings=_settings(),
+        transport=_scripted(scripts, seen),
+    )
+    captured = capsys.readouterr()
+
+    assert code == 0
+    assert "Attempt 1: VERIFIED and HARDENED" in captured.out
+    assert "Attempt 2" not in captured.out
+    assert "not JSON" not in captured.out
+    assert sum("return only the JSON object, no prose, no markdown" in item for item in seen) == 2
+    assert any("model fix was not JSON" in item for item in seen)
+    _assert_original_unchanged(before)
+    _assert_no_tokens(captured.out + captured.err + "\n".join(seen), database)
+    with sqlite3.connect(database) as connection:
+        rows = connection.execute("SELECT attempt, verdict FROM verifications").fetchall()
+    assert rows
+    assert {row[0] for row in rows} == {1}
+    assert {row[1] for row in rows} == {"VERIFIED"}
+
+
+def test_two_malformed_replies_consume_one_attempt(
+    mock_ai: None,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    use_server("asgi", monkeypatch)
+    before = _snapshot(SOURCE)
+    original = _original()
+    database = tmp_path / "codeguard.db"
+    seen: list[str] = []
+    scripts = {
+        "GET": ["not json", "still not json", _owner_edit(original, "GET")],
+        "PUT": ["not json", "still not json", _owner_edit(original, "PUT")],
+    }
+    code = run_fix(
+        str(_config(tmp_path)),
+        db_path=database,
+        approve=lambda _proposal: True,
+        settings=_settings(),
+        transport=_scripted(scripts, seen),
+    )
+    captured = capsys.readouterr()
+
+    assert code == 0
+    assert "Attempt 1: not JSON | Attempt 2: VERIFIED and HARDENED" in captured.out
+    assert "Attempt 3" not in captured.out
+    assert sum("return only the JSON object, no prose, no markdown" in item for item in seen) == 2
+    _assert_original_unchanged(before)
+    _assert_no_tokens(captured.out + captured.err + "\n".join(seen), database)
+    with sqlite3.connect(database) as connection:
+        rows = connection.execute(
+            "SELECT attempt, verdict FROM verifications ORDER BY finding_id, attempt"
+        ).fetchall()
+    assert {row[0] for row in rows} == {1, 2}
+    assert {row[1] for row in rows if row[0] == 1} == {"rejected"}
+    assert {row[1] for row in rows if row[0] == 2} == {"VERIFIED"}
+
+
+def test_final_block_omits_verified_when_the_bypass_check_failed(
+    mock_ai: None,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    use_server("asgi", monkeypatch)
+    before = _snapshot(SOURCE)
+    original = _original()
+    database = tmp_path / "codeguard.db"
+    unchanged = _change_nothing(original)
+    code = run_fix(
+        str(_config(tmp_path)),
+        db_path=database,
+        approve=lambda _proposal: True,
+        settings=_settings(),
+        transport=_payloads(
+            {"GET": [_owner_edit(original, "GET")], "PUT": [unchanged["PUT"][0]]}
+        ),
+    )
+    captured = capsys.readouterr()
+    history = _history_line(captured.out, "bypass found via PUT /documents/101 as bob -> 200")
+    block = _block_after(captured.out, history)
+
+    assert code == 1
+    assert history.index("Attempt 1:") < history.index("Attempt 2:") < history.index("Attempt 3:")
+    assert "VERIFIED" not in history
+    assert "VERIFIED" not in block
+    assert "VERIFICATION FAILED:" in block
+    _assert_original_unchanged(before)
+    _assert_no_tokens(captured.out + captured.err, database)
+
+
 def test_get_only_patch_reports_a_put_bypass_and_repairs(
     mock_ai: None,
     tmp_path: Path,
@@ -695,8 +844,11 @@ def test_get_only_patch_reports_a_put_bypass_and_repairs(
     captured = capsys.readouterr()
 
     assert code == 0
-    assert "Bypass check: BYPASS FOUND via PUT /documents/101 as bob -> 200" in captured.out
-    assert "Attempt 2: VERIFIED" in captured.out
+    assert (
+        "Attempt 1: bypass found via PUT /documents/101 as bob -> 200 | Attempt 2: VERIFIED and HARDENED"
+        in captured.out
+    )
+    assert "Every method on the same resource path needs the same owner check." in "\n".join(seen)
     assert any("PUT /documents/101" in item and "as bob" in item and "200" in item for item in seen)
     _assert_original_unchanged(before)
     _assert_no_tokens(captured.out + captured.err + "\n".join(seen), database)
@@ -752,7 +904,7 @@ def test_variant_5xx_is_inconclusive_and_does_not_repair(
 
     assert code == 1
     assert "INCONCLUSIVE: bypass check timed out or returned 5xx" in captured.out
-    assert "Bypass check: 14 variants, inconclusive" in captured.out
+    assert "VERIFIED" not in captured.out
     assert "Attempt 2" not in captured.out
     assert "BYPASS FOUND" not in captured.out
     _assert_original_unchanged(before)
