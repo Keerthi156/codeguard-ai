@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import difflib
 import json
 import socket
 import sqlite3
@@ -15,6 +14,7 @@ import pytest
 
 from app.cli import main
 from app.config import Settings
+from tests.conftest import SERVERS, use_server
 from app.findings.classifier import Finding
 from app.remediation.verifier import _detail_line, _pytest_note, _report, _typed_approval, run_fix
 from app.runner.executor import Evidence, TestResult
@@ -59,30 +59,40 @@ def _snapshot(root: Path) -> dict[str, bytes]:
     }
 
 
-def _diff(original: str, patched: str) -> str:
-    return "".join(
-        difflib.unified_diff(
-            original.splitlines(keepends=True),
-            patched.splitlines(keepends=True),
-            fromfile="a/app.py",
-            tofile="b/app.py",
-        )
-    )
+def _edit(old: str, new: str) -> dict[str, object]:
+    return {
+        "file": "app.py",
+        "edits": [{"old": old, "new": new}],
+        "root_cause": "the handler does not compare the caller with the owner",
+        "side_effects": "described for the test",
+    }
 
 
-def _payloads(diffs: dict[str, str]) -> httpx.MockTransport:
+def _payloads(scripts: dict[str, list[dict[str, object]]]) -> httpx.MockTransport:
+    cursors = {method: 0 for method in scripts}
+
     def handler(request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content.decode())
         message = json.loads(body["messages"][1]["content"])
-        content = json.dumps(
-            {
-                "file": "app.py",
-                "unified_diff": diffs[message["method"]],
-                "root_cause": "the handler does not compare the caller with the owner",
-                "side_effects": "described for the test",
-            }
+        method = str(message["method"])
+        queue = scripts[method]
+        index = min(cursors[method], len(queue) - 1)
+        cursors[method] += 1
+        return httpx.Response(
+            200,
+            json={
+                "reasoning": _KEY,
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": json.dumps(queue[index]),
+                            "reasoning_content": "private-chain-of-thought-9c1e",
+                        }
+                    }
+                ],
+            },
         )
-        return httpx.Response(200, json={"choices": [{"message": {"role": "assistant", "content": content}}]})
 
     return httpx.MockTransport(handler)
 
@@ -91,50 +101,85 @@ def _original() -> str:
     return (SOURCE / "app.py").read_text(encoding="utf-8")
 
 
-def _deny_everyone(original: str) -> dict[str, str]:
+def _deny_everyone(original: str) -> dict[str, list[dict[str, object]]]:
+    del original
     get_old = "    return _existing_document(id)\n"
     get_new = '    raise HTTPException(status_code=404, detail="Document not found")\n'
     put_old = "    document = _existing_document(id)\n"
     put_new = put_old + '    raise HTTPException(status_code=404, detail="Document not found")\n'
-    return {
-        "GET": _diff(original, original.replace(get_old, get_new, 1)),
-        "PUT": _diff(original, original.replace(put_old, put_new, 1)),
-    }
+    return {"GET": [_edit(get_old, get_new)], "PUT": [_edit(put_old, put_new)]}
 
 
-def _change_nothing(original: str) -> dict[str, str]:
+def _change_nothing(original: str) -> dict[str, list[dict[str, object]]]:
+    del original
     return {
-        "GET": _diff(
-            original,
-            original.replace(
+        "GET": [
+            _edit(
                 '"""Return the document when the token is valid. Ownership is not checked."""',
                 '"""Return the document when the token is valid. Ownership is not checked. Unchanged."""',
-                1,
-            ),
-        ),
-        "PUT": _diff(
-            original,
-            original.replace(
+            )
+        ],
+        "PUT": [
+            _edit(
                 '"""Replace title and content when the token is valid. Ownership is not checked."""',
                 '"""Replace title and content when the token is valid. Ownership is not checked. Unchanged."""',
-                1,
-            ),
-        ),
+            )
+        ],
     }
 
 
-def _startup_failure(original: str) -> dict[str, str]:
-    broken = original.replace(
-        "app = FastAPI(",
-        'raise RuntimeError("startup failed")\napp = FastAPI(',
-        1,
-    )
-    noted = original.replace(
-        '"""Replace title and content when the token is valid. Ownership is not checked."""',
-        '"""Replace title and content when the token is valid. Ownership is not checked. Unchanged."""',
-        1,
-    )
-    return {"GET": _diff(original, broken), "PUT": _diff(original, noted)}
+def _startup_failure(original: str) -> dict[str, list[dict[str, object]]]:
+    del original
+    return {
+        "GET": [_edit("app = FastAPI(", 'raise RuntimeError("startup failed")\napp = FastAPI(')],
+        "PUT": [
+            _edit(
+                '"""Replace title and content when the token is valid. Ownership is not checked."""',
+                '"""Replace title and content when the token is valid. Ownership is not checked. Unchanged."""',
+            )
+        ],
+    }
+
+
+def _owner_edit(original: str, method: str) -> dict[str, object]:
+    if method == "GET":
+        old = (
+            "def get_document(id: int, _user: Annotated[str, Depends(require_user)]) -> Document:\n"
+            '    """Return the document when the token is valid. Ownership is not checked."""\n'
+            "    return _existing_document(id)\n"
+        )
+        new = (
+            "def get_document(id: int, user: Annotated[str, Depends(require_user)]) -> Document:\n"
+            '    """Return the document when the token is valid. Ownership is not checked."""\n'
+            "    document = _existing_document(id)\n"
+            "    if document.owner != user:\n"
+            '        raise HTTPException(status_code=404, detail="Document not found")\n'
+            "    return document\n"
+        )
+    else:
+        old = (
+            "def update_document(\n"
+            "    id: int,\n"
+            "    body: DocumentUpdate,\n"
+            "    _user: Annotated[str, Depends(require_user)],\n"
+            ") -> Document:\n"
+            '    """Replace title and content when the token is valid. Ownership is not checked."""\n'
+            "    document = _existing_document(id)\n"
+        )
+        new = (
+            "def update_document(\n"
+            "    id: int,\n"
+            "    body: DocumentUpdate,\n"
+            "    user: Annotated[str, Depends(require_user)],\n"
+            ") -> Document:\n"
+            '    """Replace title and content when the token is valid. Ownership is not checked."""\n'
+            "    document = _existing_document(id)\n"
+            "    if document.owner != user:\n"
+            '        raise HTTPException(status_code=404, detail="Document not found")\n'
+        )
+    if original.count(old) != 1:
+        raise AssertionError(f"{method} snippet was not unique")
+    return _edit(old, new)
 
 
 def _patch_dirs() -> set[str]:
@@ -247,7 +292,15 @@ def test_compact_report_uses_counts_and_plain_text() -> None:
     assert _detail_line(cases[-1], before[cases[-1].id]).endswith("401 denied")
 
 
-def test_canned_patch_is_verified(mock_ai: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+@pytest.mark.parametrize("server", SERVERS)
+def test_canned_patch_is_verified(
+    server: str,
+    mock_ai: None,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    use_server(server, monkeypatch)
     before = _snapshot(SOURCE)
     temps = _patch_dirs()
     database = tmp_path / "codeguard.db"
@@ -291,9 +344,15 @@ def test_canned_patch_is_verified(mock_ai: None, tmp_path: Path, monkeypatch: py
         assert created_at
 
 
+@pytest.mark.parametrize("server", SERVERS)
 def test_patch_that_denies_everyone_fails_the_owner_check(
-    mock_ai: None, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    server: str,
+    mock_ai: None,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
+    use_server(server, monkeypatch)
     before = _snapshot(SOURCE)
     database = tmp_path / "codeguard.db"
     original = _original()
@@ -322,9 +381,15 @@ def test_patch_that_denies_everyone_fails_the_owner_check(
     assert "404denied" not in stored
 
 
+@pytest.mark.parametrize("server", SERVERS)
 def test_patch_that_changes_nothing_leaves_the_exploit_working(
-    mock_ai: None, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    server: str,
+    mock_ai: None,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
+    use_server(server, monkeypatch)
     before = _snapshot(SOURCE)
     database = tmp_path / "codeguard.db"
 
@@ -349,9 +414,15 @@ def test_patch_that_changes_nothing_leaves_the_exploit_working(
     _assert_no_tokens(captured.out + captured.err, database)
 
 
+@pytest.mark.parametrize("server", SERVERS)
 def test_declined_approval_applies_nothing(
-    mock_ai: None, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    server: str,
+    mock_ai: None,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
+    use_server(server, monkeypatch)
     before = _snapshot(SOURCE)
     temps = _patch_dirs()
     database = tmp_path / "codeguard.db"
@@ -378,9 +449,15 @@ def test_declined_approval_applies_nothing(
     assert finding_status == [("Fix proposed",), ("Fix proposed",)]
 
 
+@pytest.mark.parametrize("server", SERVERS)
 def test_patched_app_that_fails_to_start_is_inconclusive(
-    mock_ai: None, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    server: str,
+    mock_ai: None,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
+    use_server(server, monkeypatch)
     before = _snapshot(SOURCE)
     temps = _patch_dirs()
     database = tmp_path / "codeguard.db"
@@ -405,6 +482,166 @@ def test_patched_app_that_fails_to_start_is_inconclusive(
     with sqlite3.connect(database) as connection:
         statuses = {row[0] for row in connection.execute("SELECT final_status FROM verifications")}
     assert statuses == {"Inconclusive"}
+
+
+def test_valid_edit_is_verified_on_attempt_1(
+    mock_ai: None,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    use_server("asgi", monkeypatch)
+    before = _snapshot(SOURCE)
+    original = _original()
+    database = tmp_path / "codeguard.db"
+
+    code = run_fix(
+        str(_config(tmp_path)),
+        db_path=database,
+        approve=lambda _proposal: True,
+        settings=_settings(),
+        transport=_payloads(
+            {"GET": [_owner_edit(original, "GET")], "PUT": [_owner_edit(original, "PUT")]}
+        ),
+    )
+    captured = capsys.readouterr()
+
+    assert code == 0
+    assert "Attempt 1: VERIFIED" in captured.out
+    assert "Attempt 2" not in captured.out
+    assert "private-chain-of-thought-9c1e" not in captured.out
+    assert "CannedPatch" not in captured.out
+    _assert_original_unchanged(before)
+    _assert_no_tokens(captured.out + captured.err, database)
+    with sqlite3.connect(database) as connection:
+        rows = connection.execute(
+            "SELECT attempt, verdict, final_status FROM verifications ORDER BY finding_id"
+        ).fetchall()
+    assert rows
+    assert {row[0] for row in rows} == {1}
+    assert {row[1] for row in rows} == {"VERIFIED"}
+    assert {row[2] for row in rows} == {"Verified"}
+
+
+def test_missing_old_text_is_repaired_on_attempt_2(
+    mock_ai: None,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    use_server("asgi", monkeypatch)
+    before = _snapshot(SOURCE)
+    original = _original()
+    database = tmp_path / "codeguard.db"
+    missing = _edit("this snippet is not in the file", "x = 1\n")
+
+    code = run_fix(
+        str(_config(tmp_path)),
+        db_path=database,
+        approve=lambda _proposal: True,
+        settings=_settings(),
+        transport=_payloads(
+            {
+                "GET": [missing, _owner_edit(original, "GET")],
+                "PUT": [missing, _owner_edit(original, "PUT")],
+            }
+        ),
+    )
+    captured = capsys.readouterr()
+
+    assert code == 0
+    assert "Attempt 1: rejected (old text not found) -> Attempt 2: VERIFIED" in captured.out
+    assert "private-chain-of-thought-9c1e" not in captured.out
+    assert "CannedPatch" not in captured.out
+    _assert_original_unchanged(before)
+    _assert_no_tokens(captured.out + captured.err, database)
+    with sqlite3.connect(database) as connection:
+        rows = connection.execute(
+            "SELECT attempt, verdict, failure_reason FROM verifications ORDER BY finding_id, attempt"
+        ).fetchall()
+    assert [tuple(row) for row in rows if row[0] == 1]
+    assert {row[1] for row in rows if row[0] == 1} == {"rejected"}
+    assert {row[2] for row in rows if row[0] == 1} == {"old text not found"}
+    assert {row[1] for row in rows if row[0] == 2} == {"VERIFIED"}
+
+
+def test_owner_check_failure_is_repaired_and_verified(
+    mock_ai: None,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    use_server("asgi", monkeypatch)
+    before = _snapshot(SOURCE)
+    original = _original()
+    database = tmp_path / "codeguard.db"
+    denied = _deny_everyone(original)
+
+    code = run_fix(
+        str(_config(tmp_path)),
+        db_path=database,
+        approve=lambda _proposal: True,
+        settings=_settings(),
+        transport=_payloads(
+            {
+                "GET": [denied["GET"][0], _owner_edit(original, "GET")],
+                "PUT": [denied["PUT"][0], _owner_edit(original, "PUT")],
+            }
+        ),
+    )
+    captured = capsys.readouterr()
+
+    assert code == 0
+    assert "Attempt 1: VERIFICATION FAILED" in captured.out
+    assert "owner check failed" in captured.out
+    assert "Attempt 2: VERIFIED" in captured.out
+    assert "CannedPatch" not in captured.out
+    _assert_original_unchanged(before)
+    _assert_no_tokens(captured.out + captured.err, database)
+    with sqlite3.connect(database) as connection:
+        rows = connection.execute(
+            "SELECT attempt, verdict FROM verifications ORDER BY attempt"
+        ).fetchall()
+    assert {row[1] for row in rows if row[0] == 1} == {"VERIFICATION FAILED"}
+    assert {row[1] for row in rows if row[0] == 2} == {"VERIFIED"}
+
+
+def test_three_bad_edits_end_as_verification_failed(
+    mock_ai: None,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    use_server("asgi", monkeypatch)
+    before = _snapshot(SOURCE)
+    original = _original()
+    database = tmp_path / "codeguard.db"
+    bad = _edit(original, "import subprocess\n" + original)
+
+    code = run_fix(
+        str(_config(tmp_path)),
+        db_path=database,
+        approve=lambda _proposal: True,
+        settings=_settings(),
+        transport=_payloads({"GET": [bad], "PUT": [bad]}),
+    )
+    captured = capsys.readouterr()
+
+    assert code == 1
+    assert "Attempt 1: rejected (diff adds a forbidden import: subprocess)" in captured.out
+    assert "Attempt 3: rejected (diff adds a forbidden import: subprocess)" in captured.out
+    assert "VERIFICATION FAILED:" in captured.out
+    assert "CannedPatch" not in captured.out
+    assert "private-chain-of-thought-9c1e" not in captured.out
+    _assert_original_unchanged(before)
+    _assert_no_tokens(captured.out + captured.err, database)
+    with sqlite3.connect(database) as connection:
+        rows = connection.execute(
+            "SELECT attempt, verdict, final_status FROM verifications"
+        ).fetchall()
+    assert {row[0] for row in rows} == {1, 2, 3}
+    assert {row[1] for row in rows} == {"rejected"}
+    assert {row[2] for row in rows if row[0] == 3} == {"Verification failed"}
 
 
 def _finding() -> Finding:

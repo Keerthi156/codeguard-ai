@@ -59,7 +59,10 @@ CREATE TABLE IF NOT EXISTS verifications (
     patch_diff TEXT NOT NULL,
     check_results TEXT NOT NULL,
     final_status TEXT NOT NULL,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    attempt INTEGER NOT NULL DEFAULT 1,
+    failure_reason TEXT NOT NULL DEFAULT '',
+    verdict TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS test_results (
@@ -91,6 +94,7 @@ class FindingStore:
             _ensure_label_column(connection)
             _ensure_scan_columns(connection)
             _ensure_finding_columns(connection)
+            _ensure_verification_columns(connection)
             connection.commit()
 
     def save_finding(self, finding: Finding, results: Sequence[TestResult] = ()) -> int:
@@ -154,16 +158,30 @@ class FindingStore:
         check_results: str,
         final_status: str,
         created_at: datetime,
+        *,
+        attempt: int = 1,
+        failure_reason: str = "",
+        verdict: str = "",
     ) -> None:
-        """Store one fix-gate result. The diff and check text must already be redacted."""
+        """Store one fix attempt. The diff and check text must already be redacted."""
         with self._connect() as connection:
             connection.execute(
                 """
                 INSERT INTO verifications (
-                    finding_id, patch_diff, check_results, final_status, created_at
-                ) VALUES (?, ?, ?, ?, ?)
+                    finding_id, patch_diff, check_results, final_status, created_at,
+                    attempt, failure_reason, verdict
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (finding_id, patch_diff, check_results, final_status, _iso(created_at)),
+                (
+                    finding_id,
+                    patch_diff,
+                    check_results,
+                    final_status,
+                    _iso(created_at),
+                    attempt,
+                    failure_reason,
+                    verdict,
+                ),
             )
             connection.commit()
 
@@ -328,6 +346,18 @@ def _ensure_scan_columns(connection: sqlite3.Connection) -> None:
     for name, declaration in additions:
         if name not in existing:
             connection.execute(f"ALTER TABLE scan_runs ADD COLUMN {name} {declaration}")
+
+
+def _ensure_verification_columns(connection: sqlite3.Connection) -> None:
+    existing = {row[1] for row in connection.execute("PRAGMA table_info(verifications)")}
+    additions = (
+        ("attempt", "INTEGER NOT NULL DEFAULT 1"),
+        ("failure_reason", "TEXT NOT NULL DEFAULT ''"),
+        ("verdict", "TEXT NOT NULL DEFAULT ''"),
+    )
+    for name, declaration in additions:
+        if name not in existing:
+            connection.execute(f"ALTER TABLE verifications ADD COLUMN {name} {declaration}")
 
 
 def _ensure_finding_columns(connection: sqlite3.Connection) -> None:

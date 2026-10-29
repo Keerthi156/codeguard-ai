@@ -20,6 +20,7 @@ from app.analyzer.auth_checks import RouteFinding, assess_routes
 from app.analyzer.routes import discover_routes
 from app.cli import main
 from app.config import Settings
+from app.runner.executor import Evidence, TestResult
 from app.schemas import AuthorizationMatrix, Resource, TestPlan, User, default_owner_only_matrix
 from app.target_config import load_target_config
 
@@ -416,6 +417,7 @@ def test_scan_summary_names_the_provider(tmp_path: Path, monkeypatch: pytest.Mon
         transport=_transport([_ok(_submit(json.loads(plan.model_dump_json())))], seen),
     )
     monkeypatch.setattr("app.cli.get_provider", lambda: provider)
+    _block_target_network(monkeypatch)
     database = tmp_path / "codeguard.db"
 
     code = main(["scan", "--config", str(config_path), "--db", str(database), "--no-start"])
@@ -493,6 +495,36 @@ def test_tools_fall_back_to_json_when_the_endpoint_rejects_them(caplog: pytest.L
     assert "Plan submissions: 1" in provider.model_run().text()
 
 
+def _block_target_network(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Return an immediate inconclusive result. Do not open a socket."""
+
+    async def offline(tests: list[object], config: object, **_kwargs: object) -> list[TestResult]:
+        del config
+        results: list[TestResult] = []
+        for test in tests:
+            route = str(getattr(test, "route"))
+            resource_id = str(getattr(test, "resource_id"))
+            results.append(
+                TestResult(
+                    test_id=str(getattr(test, "id")),
+                    status_code=None,
+                    access=None,
+                    matches_expected=None,
+                    outcome="inconclusive",
+                    evidence=Evidence(
+                        method=str(getattr(test, "method")),
+                        path=route.replace("{id}", resource_id),
+                        identity=str(getattr(test, "identity")),
+                        status_code=None,
+                        body="connection failed",
+                    ),
+                )
+            )
+        return results
+
+    monkeypatch.setattr("app.cli.execute_plan", offline)
+
+
 def _offline_config(tmp_path: Path) -> Path:
     root = Path(__file__).resolve().parents[1]
     source = (root / "fixtures" / "codeguard.vulnerable.yaml").read_text(encoding="utf-8")
@@ -513,6 +545,7 @@ def test_a_corrected_submission_succeeds(
     replies = [_ok(_submit(_BAD_PLAN)), _ok(_submit({"cases": [_CASE]}))]
     provider = LLMProvider(_settings(), transport=_transport(replies, seen))
     monkeypatch.setattr("app.cli.get_provider", lambda: provider)
+    _block_target_network(monkeypatch)
 
     code = main(["scan", "--config", str(_offline_config(tmp_path)), "--db", str(tmp_path / "codeguard.db"), "--no-start"])
     captured = capsys.readouterr()

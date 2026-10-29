@@ -17,7 +17,7 @@ import tempfile
 import textwrap
 import time
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -44,10 +44,29 @@ _READY_TIMEOUT_SECONDS = 30.0
 _STOP_TIMEOUT_SECONDS = 5.0
 _PYTEST_TIMEOUT_SECONDS = 60.0
 _REPORT_WIDTH = 100
+_MAX_REPAIR_ATTEMPTS = 2
 
 
 class FixUsageError(Exception):
     """A config or validation problem. The fix command exits 2."""
+
+
+@dataclass
+class _Tracked:
+    finding: Finding
+    route_file: str
+    handler_source: str
+    line_numbers: tuple[int, ...]
+    labels: list[str] = field(default_factory=list)
+    proposal: PatchProposal | None = None
+    feedback: str | None = None
+    done: bool = False
+    declined: bool = False
+    attempts: int = 0
+    final_status: str = ""
+    final_reason: str = ""
+    checks: list[_GateCheck] = field(default_factory=list)
+    observed: dict[str, TestResult] = field(default_factory=dict)
 
 
 @dataclass
@@ -156,104 +175,31 @@ def _run(
         print(_redact("0 verified, 0 verification failed, 0 inconclusive, 0 declined", tokens))
         return 0
 
-    approved: list[tuple[Finding, PatchProposal]] = []
-    declined: list[tuple[Finding, PatchProposal]] = []
-    proposal_dirs: list[Path] = []
-    try:
-        for finding in confirmed:
-            route = route_for(finding, route_findings)
-            if route is None:
-                raise FixUsageError(f"validation error: no handler for {finding.method} {finding.route}")
-            try:
-                proposal = propose_patch(
-                    finding,
-                    source_dir=source_dir,
-                    route_file=route.file,
-                    handler_source=route.source,
-                    line_numbers=route.line_numbers,
-                    matrix=config.matrix(),
-                    settings=settings,
-                    transport=transport,
-                    canned=canned,
-                )
-            except (PatchRejected, RuntimeError) as exc:
-                raise FixUsageError(f"validation error: {_redact(str(exc), tokens)}") from exc
-            proposal_dirs.append(Path(proposal.temp_copy_path))
-            _print_proposal(finding, proposal, tokens)
-            if approve(proposal):
-                approved.append((finding, proposal))
-            else:
-                declined.append((finding, proposal))
-                _record(store, finding, proposal, [], "Fix proposed", "The user declined the patch.", tokens)
-                print(_redact(f"{finding.method} {finding.route}: Fix proposed: the user declined the patch", tokens))
-    finally:
-        for path in proposal_dirs:
-            _remove_tree(path, source_dir)
-
-    copied: Path | None = None
-    patched: _Running | None = None
-    after: dict[str, TestResult] = {}
-    regression_note = ""
-    inconclusive_reason = ""
-    try:
-        if approved:
-            try:
-                copied = materialize(source_dir, [(item.file, item.diff) for _finding, item in approved])
-            except PatchRejected as exc:
-                raise FixUsageError(f"validation error: {exc}") from exc
-            base_url, patched, start_error = _start_copy(copied, config, tokens)
-            if start_error:
-                inconclusive_reason = start_error
-            else:
-                patched_config = config.model_copy(update={"base_url": base_url})
-                rerun = asyncio.run(execute_plan(cases, patched_config))
-                after = {result.test_id: result for result in rerun}
-                regression_note = _pytest_note(copied)
-    finally:
-        if patched is not None:
-            patched.stop()
-        if copied is not None:
-            _remove_tree(copied, source_dir)
-
-    verified = failed = inconclusive = 0
+    tracked = _track(confirmed, route_findings)
     owners = {resource.id: resource.owner for resource in config.resources}
     before_by_id = {result.test_id: result for result in before}
-    for finding, _proposal in declined:
-        print(_redact(_wrap(f"Finding: {finding.method} {finding.route}\nDECLINED: the user declined the patch"), tokens))
-    for finding, proposal in approved:
-        checks, status, reason = _gate(
-            finding,
-            cases,
-            before,
-            after,
-            config,
-            inconclusive_reason,
-            regression_note,
-        )
-        _record(store, finding, proposal, checks, status, reason, tokens)
-        if status == "Verified":
-            verified += 1
-        elif status == "Inconclusive":
-            inconclusive += 1
-        else:
-            failed += 1
-        print(
-            _redact(
-                _report(
-                    finding,
-                    status,
-                    reason,
-                    cases,
-                    before_by_id,
-                    after,
-                    owners,
-                    details,
-                ),
-                tokens,
-            )
-        )
+    _repair(
+        tracked,
+        source_dir=source_dir,
+        cases=cases,
+        before=before,
+        before_by_id=before_by_id,
+        config=config,
+        tokens=tokens,
+        store=store,
+        approve=approve,
+        settings=settings,
+        transport=transport,
+        canned=canned,
+        details=details,
+        owners=owners,
+    )
+    verified = sum(item.final_status == "Verified" for item in tracked)
+    failed = sum(item.final_status == "Verification failed" for item in tracked)
+    inconclusive = sum(item.final_status == "Inconclusive" for item in tracked)
+    declined = sum(item.declined for item in tracked)
     summary = (
-        f"{verified} verified, {failed} verification failed, {inconclusive} inconclusive, {len(declined)} declined"
+        f"{verified} verified, {failed} verification failed, {inconclusive} inconclusive, {declined} declined"
     )
     print(_redact(summary, tokens))
     if failed or inconclusive:
@@ -261,6 +207,250 @@ def _run(
     if declined:
         return 3
     return 0
+
+
+def _track(confirmed: Sequence[Finding], route_findings: Sequence[object]) -> list[_Tracked]:
+    tracked: list[_Tracked] = []
+    for finding in confirmed:
+        route = route_for(finding, route_findings)  # type: ignore[arg-type]
+        if route is None:
+            raise FixUsageError(f"validation error: no handler for {finding.method} {finding.route}")
+        tracked.append(
+            _Tracked(
+                finding=finding,
+                route_file=route.file,
+                handler_source=route.source,
+                line_numbers=tuple(route.line_numbers),
+            )
+        )
+    return tracked
+
+
+def _repair(
+    tracked: list[_Tracked],
+    *,
+    source_dir: Path,
+    cases: Sequence[TestCase],
+    before: Sequence[TestResult],
+    before_by_id: dict[str, TestResult],
+    config: TargetConfig,
+    tokens: Sequence[str],
+    store: FindingStore,
+    approve: Callable[[PatchProposal], bool],
+    settings: Settings | None,
+    transport: httpx.BaseTransport | None,
+    canned: bool,
+    details: bool,
+    owners: dict[str, str],
+) -> None:
+    """Propose, gate, and repair each finding. A finding gets at most two repairs."""
+    limit = 1 + _MAX_REPAIR_ATTEMPTS
+    for _round in range(limit):
+        if all(item.done for item in tracked):
+            break
+        fresh: list[_Tracked] = []
+        proposal_dirs: list[Path] = []
+        try:
+            for item in tracked:
+                if item.done:
+                    continue
+                item.attempts += 1
+                try:
+                    proposal = propose_patch(
+                        item.finding,
+                        source_dir=source_dir,
+                        route_file=item.route_file,
+                        handler_source=item.handler_source,
+                        line_numbers=item.line_numbers,
+                        matrix=config.matrix(),
+                        settings=settings,
+                        transport=transport,
+                        canned=canned and item.attempts == 1,
+                        feedback=None if canned else item.feedback,
+                    )
+                except PatchRejected as exc:
+                    if canned:
+                        raise FixUsageError(f"validation error: {_redact(str(exc), tokens)}") from exc
+                    reason = _redact(str(exc), tokens)
+                    item.labels.append(f"Attempt {item.attempts}: rejected ({reason})")
+                    terminal = item.attempts >= limit
+                    _record(
+                        store,
+                        item.finding,
+                        None,
+                        [],
+                        "Verification failed" if terminal else "rejected",
+                        reason,
+                        tokens,
+                        attempt=item.attempts,
+                        failure_reason=reason,
+                        verdict="rejected",
+                    )
+                    if terminal:
+                        item.done = True
+                        item.final_status = "Verification failed"
+                        item.final_reason = reason
+                    else:
+                        item.feedback = reason
+                    continue
+                except RuntimeError as exc:
+                    raise FixUsageError(f"validation error: {_redact(str(exc), tokens)}") from exc
+                proposal_dirs.append(Path(proposal.temp_copy_path))
+                _print_proposal(item.finding, proposal, tokens)
+                if approve(proposal):
+                    item.proposal = proposal
+                    fresh.append(item)
+                    continue
+                item.declined = True
+                item.done = True
+                item.final_status = "Fix proposed"
+                item.final_reason = "The user declined the patch."
+                _record(
+                    store,
+                    item.finding,
+                    proposal,
+                    [],
+                    "Fix proposed",
+                    item.final_reason,
+                    tokens,
+                    attempt=item.attempts,
+                    failure_reason="",
+                    verdict="declined",
+                )
+                print(
+                    _redact(
+                        f"{item.finding.method} {item.finding.route}: Fix proposed: the user declined the patch",
+                        tokens,
+                    )
+                )
+        finally:
+            for path in proposal_dirs:
+                _remove_tree(path, source_dir)
+        if not fresh:
+            continue
+        after, regression_note, start_error = _run_patched(source_dir, tracked, config, tokens, cases)
+        for item in fresh:
+            checks, status, reason = _gate(
+                item.finding,
+                cases,
+                before,
+                after,
+                config,
+                start_error,
+                regression_note,
+            )
+            reason_text = _redact(reason, tokens)
+            verdict = _verdict_name(status)
+            item.labels.append(_attempt_label(item.attempts, verdict, reason_text))
+            item.checks = list(checks)
+            item.observed = after
+            _record(
+                store,
+                item.finding,
+                item.proposal,
+                checks,
+                status,
+                reason_text,
+                tokens,
+                attempt=item.attempts,
+                failure_reason="" if status == "Verified" else reason_text,
+                verdict=verdict,
+            )
+            if status == "Verification failed" and not canned and item.attempts < limit:
+                item.feedback = _gate_feedback(reason_text, checks)
+                continue
+            item.done = True
+            item.final_status = status
+            item.final_reason = reason_text
+    for item in tracked:
+        if item.labels:
+            print(_redact(" -> ".join(item.labels), tokens))
+        if item.declined:
+            print(
+                _redact(
+                    _wrap(
+                        f"Finding: {item.finding.method} {item.finding.route}\nDECLINED: the user declined the patch"
+                    ),
+                    tokens,
+                )
+            )
+        elif item.checks and item.proposal is not None:
+            print(
+                _redact(
+                    _report(
+                        item.finding,
+                        item.final_status,
+                        item.final_reason,
+                        cases,
+                        before_by_id,
+                        item.observed,
+                        owners,
+                        details,
+                    ),
+                    tokens,
+                )
+            )
+        elif item.final_status == "Verification failed":
+            print(_redact(f"VERIFICATION FAILED: {item.final_reason}", tokens))
+
+
+def _run_patched(
+    source_dir: Path,
+    tracked: Sequence[_Tracked],
+    config: TargetConfig,
+    tokens: Sequence[str],
+    cases: Sequence[TestCase],
+) -> tuple[dict[str, TestResult], str, str]:
+    chosen = [
+        (item.proposal.file, item.proposal.diff)
+        for item in tracked
+        if item.proposal is not None and not item.declined
+    ]
+    copied: Path | None = None
+    patched: _Running | None = None
+    try:
+        try:
+            copied = materialize(source_dir, chosen)
+        except PatchRejected as exc:
+            raise FixUsageError(f"validation error: {exc}") from exc
+        base_url, patched, start_error = _start_copy(copied, config, tokens)
+        if start_error:
+            return {}, "", start_error
+        patched_config = config.model_copy(update={"base_url": base_url})
+        rerun = asyncio.run(execute_plan(cases, patched_config))
+        return {result.test_id: result for result in rerun}, _pytest_note(copied), ""
+    finally:
+        if patched is not None:
+            patched.stop()
+        if copied is not None:
+            _remove_tree(copied, source_dir)
+
+
+def _attempt_label(number: int, verdict: str, reason: str) -> str:
+    if verdict == "VERIFIED":
+        return f"Attempt {number}: VERIFIED"
+    return f"Attempt {number}: {verdict} ({reason})"
+
+
+def _verdict_name(status: str) -> str:
+    if status == "Verified":
+        return "VERIFIED"
+    if status == "Verification failed":
+        return "VERIFICATION FAILED"
+    if status == "Inconclusive":
+        return "INCONCLUSIVE"
+    return status
+
+
+def _gate_feedback(reason: str, checks: Sequence[_GateCheck]) -> str:
+    lines = [reason]
+    for check in checks:
+        if check.outcome == "pass":
+            continue
+        lines.append(
+            f"check {check.name} failed ({check.detail}); before: {check.before}; after: {check.after}"
+        )
+    return "\n".join(lines)
 
 
 def _gate(
@@ -385,15 +575,22 @@ def _pytest_note(source_dir: Path) -> str:
 def _record(
     store: FindingStore,
     finding: Finding,
-    proposal: PatchProposal,
+    proposal: PatchProposal | None,
     checks: Sequence[_GateCheck],
     status: str,
     reason: str,
     tokens: Sequence[str],
+    *,
+    attempt: int,
+    failure_reason: str,
+    verdict: str,
 ) -> None:
     created_at = datetime.now(timezone.utc)
     payload = [
         {
+            "attempt": attempt,
+            "verdict": verdict,
+            "failure_reason": failure_reason,
             "check": check.name,
             "result": check.outcome,
             "before": check.before,
@@ -402,12 +599,18 @@ def _record(
         }
         for check in checks
     ]
+    if not payload:
+        payload = [{"attempt": attempt, "verdict": verdict, "failure_reason": failure_reason}]
+    diff = "" if proposal is None else proposal.diff
     store.save_verification(
         finding.id,
-        _redact(proposal.diff, tokens),
+        _redact(diff, tokens),
         _redact(json.dumps(payload), tokens),
         status,
         created_at,
+        attempt=attempt,
+        failure_reason=_redact(failure_reason, tokens),
+        verdict=verdict,
     )
     store.update_finding_status(finding.id, status, _redact(reason, tokens))
 

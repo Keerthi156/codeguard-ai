@@ -1,7 +1,8 @@
 """Propose a minimal authorization fix and apply it only to a temporary copy.
 
-The model may describe a unified diff. This module checks that diff before
-writing anything. The original source directory is never modified.
+The model submits exact text edits. This module applies them, generates the
+unified diff itself, and checks that diff before writing anything. The original
+source directory is never modified.
 """
 
 from __future__ import annotations
@@ -34,7 +35,8 @@ _TIMEOUT_SECONDS = 60.0
 _MAX_TOKENS = 4000
 _FENCE = re.compile(r"^```[a-zA-Z0-9]*\s*|\s*```$", re.MULTILINE)
 _HUNK = re.compile(r"^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@")
-_PATCH_KEYS = frozenset({"file", "unified_diff", "root_cause", "side_effects"})
+_PATCH_KEYS = frozenset({"file", "edits", "root_cause", "side_effects"})
+_EDIT_KEYS = frozenset({"old", "new"})
 _BANNED_IMPORTS = frozenset({"os", "subprocess", "socket", "requests", "httpx"})
 _BANNED_CALLS = frozenset({"eval", "exec", "open"})
 _CANNED_LABEL = "CannedPatch (tests and --canned-patch only)"
@@ -42,7 +44,7 @@ _CANNED_ROUTE = "/documents/{id}"
 
 
 class PatchRejected(Exception):
-    """The proposed diff failed a safety check and was not written."""
+    """The proposed edit failed a safety check and was not written."""
 
 
 class PatchProposal(BaseModel):
@@ -75,7 +77,7 @@ class CannedPatch:
         source: str,
         relative: str,
         line_numbers: Sequence[int],
-    ) -> dict[str, str]:
+    ) -> dict[str, object]:
         """Build the JSON fields for one document handler."""
         if finding.route != _CANNED_ROUTE or finding.method.upper() not in {"GET", "PUT"}:
             raise PatchRejected(f"{_CANNED_LABEL} only covers GET and PUT {_CANNED_ROUTE}")
@@ -84,7 +86,7 @@ class CannedPatch:
         patched = _rewrite_document_handler(source, finding.method, line_numbers)
         return {
             "file": relative,
-            "unified_diff": _unified(source, patched, relative),
+            "edits": [{"old": source, "new": patched}],
             "root_cause": (
                 f"{_CANNED_LABEL}: the handler returns the document without comparing "
                 "the caller to the resource owner."
@@ -135,6 +137,7 @@ def propose_patch(
     settings: Settings | None = None,
     transport: httpx.BaseTransport | None = None,
     canned: bool = False,
+    feedback: str | None = None,
 ) -> PatchProposal:
     """Ask for one fix, validate it, and write it under a new temporary directory."""
     if finding.status != "Confirmed":
@@ -146,7 +149,16 @@ def propose_patch(
         payload = CannedPatch().fields(finding, original, relative, line_numbers)
     else:
         active = settings if settings is not None else load_settings()
-        payload = _ask_model(active, transport, finding, relative, handler_source, line_numbers, matrix)
+        payload = _ask_model(
+            active,
+            transport,
+            finding,
+            relative,
+            handler_source,
+            line_numbers,
+            matrix,
+            feedback,
+        )
     return _validate_and_apply(finding.id, root, relative, original, payload)
 
 
@@ -158,7 +170,8 @@ def _ask_model(
     handler_source: str,
     line_numbers: Sequence[int],
     matrix: AuthorizationMatrix,
-) -> dict[str, str]:
+    feedback: str | None = None,
+) -> dict[str, object]:
     missing = [
         name
         for name, value in (
@@ -178,16 +191,7 @@ def _ask_model(
             {
                 "role": "user",
                 "content": json.dumps(
-                    {
-                        "finding_id": finding.id,
-                        "route": finding.route,
-                        "method": finding.method,
-                        "reason": finding.reason,
-                        "file": relative,
-                        "line_numbers": list(line_numbers),
-                        "handler_source": handler_source,
-                        "matrix": _matrix_view(matrix),
-                    },
+                    _request_view(finding, relative, handler_source, line_numbers, matrix, feedback),
                     sort_keys=True,
                 ),
             },
@@ -216,23 +220,60 @@ def _validate_and_apply(
     source_dir: Path,
     relative: str,
     original: str,
-    payload: dict[str, str],
+    payload: dict[str, object],
 ) -> PatchProposal:
-    file_name = _clean_relative(payload["file"])
+    file_value = payload["file"]
+    if not isinstance(file_value, str):
+        raise PatchRejected("file is not the confirmed route file")
+    file_name = _clean_relative(file_value)
     if file_name != relative:
         raise PatchRejected("file is not the confirmed route file")
-    patched = _checked_text(original, payload["unified_diff"], relative)
+    patched = _apply_edits(original, _edit_pairs(payload["edits"]))
+    diff = _unified(original, patched, relative)
+    checked = _checked_text(original, diff, relative)
     destination = _copy_tree(source_dir)
-    (destination / relative).write_text(patched, encoding="utf-8")
+    (destination / relative).write_text(checked, encoding="utf-8")
+    root_cause = payload["root_cause"]
+    side_effects = payload["side_effects"]
+    if not isinstance(root_cause, str) or not isinstance(side_effects, str):
+        raise PatchRejected("model fix fields must be non-empty strings")
     return PatchProposal(
         finding_id=finding_id,
         file=relative,
-        diff=payload["unified_diff"],
-        root_cause=payload["root_cause"],
-        side_effects=payload["side_effects"],
+        diff=diff,
+        root_cause=root_cause,
+        side_effects=side_effects,
         temp_copy_path=str(destination),
         status="Fix proposed",
     )
+
+
+def _apply_edits(original: str, edits: Sequence[tuple[str, str]]) -> str:
+    """Replace each snippet once. ``old`` must occur exactly once in the current text."""
+    text = original
+    for old, new in edits:
+        found = text.count(old)
+        if found == 0:
+            raise PatchRejected("old text not found")
+        if found > 1:
+            raise PatchRejected("old text matched more than once")
+        text = text.replace(old, new, 1)
+    return text
+
+
+def _edit_pairs(value: object) -> list[tuple[str, str]]:
+    if not isinstance(value, list) or not value:
+        raise PatchRejected("model fix has unexpected fields")
+    pairs: list[tuple[str, str]] = []
+    for item in value:
+        if not isinstance(item, dict) or set(item) != _EDIT_KEYS:
+            raise PatchRejected("model fix has unexpected fields")
+        old = item["old"]
+        new = item["new"]
+        if not isinstance(old, str) or not isinstance(new, str) or not old:
+            raise PatchRejected("model fix fields must be non-empty strings")
+        pairs.append((old, new))
+    return pairs
 
 
 def _checked_text(original: str, diff: str, relative: str) -> str:
@@ -418,7 +459,8 @@ def _unified(original: str, patched: str, relative: str) -> str:
     )
 
 
-def _patch_payload(payload: object, key: str) -> dict[str, str]:
+def _patch_payload(payload: object, key: str) -> dict[str, object]:
+    """Read the edit object. Reasoning text on the message is ignored."""
     message = _message(payload)
     calls = message.get("tool_calls")
     if isinstance(calls, list) and calls:
@@ -429,10 +471,18 @@ def _patch_payload(payload: object, key: str) -> dict[str, str]:
         parsed = _object_from_text(_redact_key(text, key))
     if set(parsed) != _PATCH_KEYS:
         raise PatchRejected("model fix has unexpected fields")
-    values = {name: parsed[name] for name in _PATCH_KEYS}
-    if any(not isinstance(value, str) or not value.strip() for value in values.values()):
+    file_name = parsed["file"]
+    root_cause = parsed["root_cause"]
+    side_effects = parsed["side_effects"]
+    if any(not isinstance(value, str) or not value.strip() for value in (file_name, root_cause, side_effects)):
         raise PatchRejected("model fix fields must be non-empty strings")
-    return values
+    pairs = _edit_pairs(parsed["edits"])
+    return {
+        "file": file_name,
+        "edits": [{"old": old, "new": new} for old, new in pairs],
+        "root_cause": root_cause,
+        "side_effects": side_effects,
+    }
 
 
 def _tool_arguments(item: object, key: str) -> dict[str, object]:
@@ -475,20 +525,55 @@ def _message(payload: object) -> dict[str, object]:
     return message if isinstance(message, dict) else {}
 
 
+def _request_view(
+    finding: Finding,
+    relative: str,
+    handler_source: str,
+    line_numbers: Sequence[int],
+    matrix: AuthorizationMatrix,
+    feedback: str | None,
+) -> dict[str, object]:
+    view: dict[str, object] = {
+        "finding_id": finding.id,
+        "route": finding.route,
+        "method": finding.method,
+        "reason": finding.reason,
+        "file": relative,
+        "line_numbers": list(line_numbers),
+        "handler_source": handler_source,
+        "matrix": _matrix_view(matrix),
+    }
+    if feedback:
+        view["failure"] = feedback
+    return view
+
+
 def _patch_tool() -> dict[str, object]:
     string = {"type": "string", "minLength": 1}
     return {
         "type": "function",
         "function": {
             "name": "submit_patch",
-            "description": "Submit one unified diff for the confirmed handler. This does not apply it.",
+            "description": "Submit exact text edits for the confirmed handler. This does not apply them.",
             "parameters": {
                 "type": "object",
                 "additionalProperties": False,
-                "required": ["file", "unified_diff", "root_cause", "side_effects"],
+                "required": ["file", "edits", "root_cause", "side_effects"],
                 "properties": {
                     "file": string,
-                    "unified_diff": string,
+                    "edits": {
+                        "type": "array",
+                        "minItems": 1,
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "required": ["old", "new"],
+                            "properties": {
+                                "old": string,
+                                "new": {"type": "string"},
+                            },
+                        },
+                    },
                     "root_cause": string,
                     "side_effects": string,
                 },
@@ -500,11 +585,15 @@ def _patch_tool() -> dict[str, object]:
 def _system_prompt() -> str:
     return (
         "Reply with JSON only, or call submit_patch. "
-        "The object has exactly these keys: file, unified_diff, root_cause, side_effects. "
+        "The object has exactly these keys: file, edits, root_cause, side_effects. "
         "file is the relative path of the confirmed handler. "
-        "unified_diff touches only that file, at most 40 changed lines. "
+        "edits is a list of objects with old and new. "
+        "old is an exact snippet that appears once in that file, and new is its replacement. "
+        "Do not write a unified diff. "
+        "Change at most 40 lines. "
         "Do not add imports of os, subprocess, socket, requests, or httpx. "
-        "Do not call eval, exec, or open. Do not include commands."
+        "Do not call eval, exec, or open. Do not include commands. "
+        "If failure is present, submit a corrected edit for that failure."
     )
 
 

@@ -48,16 +48,20 @@ class BaselineCheck:
     expect_vulnerable_failure: bool = False
 
 
-def load_app(target: str) -> ModuleType:
-    """Import one fixture app module. ``target`` is ``vulnerable`` or ``secure``."""
+def load_app(target: str, apps: dict[str, ModuleType] | None = None) -> ModuleType:
+    """Return one session-imported fixture app. ``target`` is ``vulnerable`` or ``secure``."""
     if target not in {"vulnerable", "secure"}:
         raise ValueError(f"Unknown target app: {target}")
+    if apps is not None:
+        module = apps[target]
+        if isinstance(module, ModuleType):
+            return module
     return importlib.import_module(f"fixtures.{target}_api.app")
 
 
-def reset_documents(target: str) -> None:
+def reset_documents(target: str, apps: dict[str, ModuleType] | None = None) -> None:
     """Restore the in-memory documents so checks do not leak into each other."""
-    module = load_app(target)
+    module = load_app(target, apps)
     module.DOCUMENTS.clear()
     module.DOCUMENTS[ALICE_DOCUMENT_ID] = module.Document(
         id=ALICE_DOCUMENT_ID,
@@ -74,10 +78,13 @@ def reset_documents(target: str) -> None:
 
 
 @asynccontextmanager
-async def api_client(target: str) -> AsyncIterator[httpx.AsyncClient]:
+async def api_client(
+    target: str,
+    apps: dict[str, ModuleType] | None = None,
+) -> AsyncIterator[httpx.AsyncClient]:
     """HTTPX client bound to the fixture ASGI app on a localhost base URL."""
-    reset_documents(target)
-    transport = httpx.ASGITransport(app=load_app(target).app)
+    reset_documents(target, apps)
+    transport = httpx.ASGITransport(app=load_app(target, apps).app)
     try:
         async with httpx.AsyncClient(
             transport=transport,
@@ -86,7 +93,7 @@ async def api_client(target: str) -> AsyncIterator[httpx.AsyncClient]:
         ) as client:
             yield client
     finally:
-        reset_documents(target)
+        reset_documents(target, apps)
 
 
 async def check_owner_read(client: httpx.AsyncClient) -> None:
@@ -166,36 +173,36 @@ def anyio_backend() -> str:
 
 
 @pytest.mark.parametrize("target", ALL_TARGETS)
-async def test_owner_read_allowed(target: str) -> None:
-    async with api_client(target) as client:
+async def test_owner_read_allowed(target: str, fixture_apps: dict[str, ModuleType]) -> None:
+    async with api_client(target, fixture_apps) as client:
         await check_owner_read(client)
 
 
 @pytest.mark.parametrize("target", ALL_TARGETS)
-async def test_owner_write_allowed(target: str) -> None:
-    async with api_client(target) as client:
+async def test_owner_write_allowed(target: str, fixture_apps: dict[str, ModuleType]) -> None:
+    async with api_client(target, fixture_apps) as client:
         await check_owner_write(client)
 
 
 @pytest.mark.parametrize("target", NON_OWNER_TARGETS)
-async def test_non_owner_read_denied(target: str) -> None:
-    async with api_client(target) as client:
+async def test_non_owner_read_denied(target: str, fixture_apps: dict[str, ModuleType]) -> None:
+    async with api_client(target, fixture_apps) as client:
         await check_non_owner_read(client)
 
 
 @pytest.mark.parametrize("target", NON_OWNER_TARGETS)
-async def test_non_owner_write_denied(target: str) -> None:
-    async with api_client(target) as client:
+async def test_non_owner_write_denied(target: str, fixture_apps: dict[str, ModuleType]) -> None:
+    async with api_client(target, fixture_apps) as client:
         await check_non_owner_write(client)
 
 
 @pytest.mark.parametrize("target", ALL_TARGETS)
-async def test_unauthenticated_denied(target: str) -> None:
-    async with api_client(target) as client:
+async def test_unauthenticated_denied(target: str, fixture_apps: dict[str, ModuleType]) -> None:
+    async with api_client(target, fixture_apps) as client:
         await check_unauthenticated(client)
 
 
 @pytest.mark.parametrize("target", ALL_TARGETS)
-async def test_invalid_id_returns_404(target: str) -> None:
-    async with api_client(target) as client:
+async def test_invalid_id_returns_404(target: str, fixture_apps: dict[str, ModuleType]) -> None:
+    async with api_client(target, fixture_apps) as client:
         await check_invalid_id(client)

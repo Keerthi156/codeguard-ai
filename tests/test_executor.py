@@ -124,7 +124,7 @@ async def test_timeout_and_server_error_are_inconclusive() -> None:
 
     @slow.get("/documents/{id}")
     async def hang(id: int) -> dict[str, int]:
-        await asyncio.sleep(2)
+        await asyncio.sleep(0.2)
         return {"id": id}
 
     broken = FastAPI()
@@ -137,7 +137,7 @@ async def test_timeout_and_server_error_are_inconclusive() -> None:
         [case],
         config,
         transport=httpx.ASGITransport(app=slow),
-        timeout=0.2,
+        timeout=0.05,
     )
     failed = await execute_plan([case], config, transport=httpx.ASGITransport(app=broken))
 

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import difflib
 import json
 from datetime import datetime, timezone
 from pathlib import Path
@@ -65,22 +64,11 @@ def _source(tmp_path: Path, text: str = _ORIGINAL) -> Path:
     return root
 
 
-def _diff(original: str, patched: str, relative: str = "app.py") -> str:
-    return "".join(
-        difflib.unified_diff(
-            original.splitlines(keepends=True),
-            patched.splitlines(keepends=True),
-            fromfile=f"a/{relative}",
-            tofile=f"b/{relative}",
-        )
-    )
-
-
-def _payload(diff: str, file_name: str = "app.py") -> str:
+def _payload(old: str, new: str, file_name: str = "app.py") -> str:
     return json.dumps(
         {
             "file": file_name,
-            "unified_diff": diff,
+            "edits": [{"old": old, "new": new}],
             "root_cause": "the handler does not compare the caller with the owner",
             "side_effects": "a non-owner is denied",
         }
@@ -105,7 +93,14 @@ def _transport(content: str, seen: list[httpx.Request]) -> httpx.MockTransport:
     return httpx.MockTransport(handler)
 
 
-def _propose(tmp_path: Path, diff: str, *, file_name: str = "app.py", source: str = _ORIGINAL) -> PatchProposal:
+def _propose(
+    tmp_path: Path,
+    old: str,
+    new: str,
+    *,
+    file_name: str = "app.py",
+    source: str = _ORIGINAL,
+) -> PatchProposal:
     seen: list[httpx.Request] = []
     root = _source(tmp_path, source)
     return propose_patch(
@@ -116,7 +111,7 @@ def _propose(tmp_path: Path, diff: str, *, file_name: str = "app.py", source: st
         line_numbers=[1, 2],
         matrix=_matrix(),
         settings=_settings(),
-        transport=_transport(_payload(diff, file_name), seen),
+        transport=_transport(_payload(old, new, file_name), seen),
     )
 
 
@@ -132,7 +127,7 @@ def test_valid_diff_is_applied_only_to_the_temp_copy(tmp_path: Path) -> None:
         line_numbers=[1, 2],
         matrix=_matrix(),
         settings=_settings(),
-        transport=_transport(_payload(_diff(_ORIGINAL, _PATCHED)), seen),
+        transport=_transport(_payload(_ORIGINAL, _PATCHED), seen),
     )
 
     copied = Path(proposal.temp_copy_path) / "app.py"
@@ -150,35 +145,46 @@ def test_valid_diff_is_applied_only_to_the_temp_copy(tmp_path: Path) -> None:
     assert "submit_patch" in body
     tool = next(item for item in json.loads(body)["tools"] if item["function"]["name"] == "submit_patch")
     assert tool["function"]["parameters"]["additionalProperties"] is False
+    assert "unified_diff" not in tool["function"]["parameters"]["properties"]
+    assert "edits" in tool["function"]["parameters"]["required"]
 
 
 def test_diff_touching_another_file_is_rejected(tmp_path: Path) -> None:
-    other = "--- a/other.py\n+++ b/other.py\n@@ -1 +1 @@\n-x\n+y\n"
-    with pytest.raises(PatchRejected, match="another file"):
-        _propose(tmp_path, other)
+    with pytest.raises(PatchRejected, match="confirmed route file"):
+        _propose(tmp_path, _ORIGINAL, _PATCHED, file_name="other.py")
     assert (tmp_path / "api" / "app.py").read_text(encoding="utf-8") == _ORIGINAL
 
 
 def test_diff_over_40_lines_is_rejected(tmp_path: Path) -> None:
-    added = "".join(f"+line_{index} = {index}\n" for index in range(41))
-    huge = f"--- a/app.py\n+++ b/app.py\n@@ -1,1 +1,42 @@\n {_ORIGINAL.splitlines()[0]}\n{added}"
+    added = "".join(f"line_{index} = {index}\n" for index in range(41))
     with pytest.raises(PatchRejected, match="40"):
-        _propose(tmp_path, huge)
+        _propose(tmp_path, _ORIGINAL, _ORIGINAL + added)
     assert (tmp_path / "api" / "app.py").read_text(encoding="utf-8") == _ORIGINAL
 
 
 def test_diff_that_breaks_syntax_is_rejected(tmp_path: Path) -> None:
-    broken = _ORIGINAL.replace("return document", "return (")
     with pytest.raises(PatchRejected, match="does not parse"):
-        _propose(tmp_path, _diff(_ORIGINAL, broken))
+        _propose(tmp_path, "return document", "return (")
     assert (tmp_path / "api" / "app.py").read_text(encoding="utf-8") == _ORIGINAL
 
 
 def test_diff_adding_subprocess_is_rejected(tmp_path: Path) -> None:
-    imported = "import subprocess\n" + _ORIGINAL
     with pytest.raises(PatchRejected, match="subprocess"):
-        _propose(tmp_path, _diff(_ORIGINAL, imported))
+        _propose(tmp_path, _ORIGINAL, "import subprocess\n" + _ORIGINAL)
     assert (tmp_path / "api" / "app.py").read_text(encoding="utf-8") == _ORIGINAL
+
+
+def test_old_text_must_match_once(tmp_path: Path) -> None:
+    missing = tmp_path / "missing"
+    repeat = tmp_path / "repeat"
+    missing.mkdir()
+    repeat.mkdir()
+    with pytest.raises(PatchRejected, match="old text not found"):
+        _propose(missing, "missing snippet", "return document\n")
+    with pytest.raises(PatchRejected, match="old text matched more than once"):
+        _propose(repeat, "document", "record")
+    assert (missing / "api" / "app.py").read_text(encoding="utf-8") == _ORIGINAL
+    assert (repeat / "api" / "app.py").read_text(encoding="utf-8") == _ORIGINAL
 
 
 def test_canned_patch_adds_an_owner_check_on_a_copy() -> None:
