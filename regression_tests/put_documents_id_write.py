@@ -3,8 +3,8 @@
 # Route: PUT /documents/{id}
 # Operation: write
 # Date: 2026-10-29
-# Revision: 55a5023dd40ed10d807b49e5a7c6bcf780c49371
-# Root cause: Handler checked authentication via require_user but never compared document.owner to the authenticated user, so any logged-in user could overwrite any document (IDOR). Unauthenticated was already denied by require_user, but non-owner write was incorrectly allowed.
+# Revision: 8e896f27ac686de5e3a2846cac3018dbc78a3442
+# Root cause: Handler only verified authentication via require_user but never checked resource ownership against DOCUMENTS[id].owner, allowing any authenticated user (non_owner) to overwrite another user's document in violation of write: non_owner=deny.
 # Policy assumption: write access is owner allow, non-owner deny, unauthenticated deny.
 # Tokens and the base URL come from the environment. This file has no keys.
 # Requests are refused unless the base URL is http://127.0.0.1 or http://localhost.

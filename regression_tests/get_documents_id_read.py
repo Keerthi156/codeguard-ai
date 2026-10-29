@@ -3,8 +3,8 @@
 # Route: GET /documents/{id}
 # Operation: read
 # Date: 2026-10-29
-# Revision: 55a5023dd40ed10d807b49e5a7c6bcf780c49371
-# Root cause: Handler authenticated the user via require_user but never authorized ownership before returning the document, allowing any authenticated non-owner to read any document and violating the matrix's non_owner: deny requirement.
+# Revision: 8e896f27ac686de5e3a2846cac3018dbc78a3442
+# Root cause: Missing object-level authorization: get_document returned any document by ID after only authentication via require_user, without verifying doc.owner == authenticated user, allowing IDOR across alice/bob resources.
 # Policy assumption: read access is owner allow, non-owner deny, unauthenticated deny.
 # Tokens and the base URL come from the environment. This file has no keys.
 # Requests are refused unless the base URL is http://127.0.0.1 or http://localhost.

@@ -68,7 +68,7 @@ class _Tracked:
     final_reason: str = ""
     checks: list[_GateCheck] = field(default_factory=list)
     observed: dict[str, TestResult] = field(default_factory=dict)
-    variant_history: list[str] = field(default_factory=list)
+    final_variant: VariantReport | None = None
 
 
 @dataclass
@@ -274,7 +274,10 @@ def _repair(
                     if canned:
                         raise FixUsageError(f"validation error: {_redact(str(exc), tokens)}") from exc
                     reason = _redact(str(exc), tokens)
-                    item.labels.append(f"Attempt {item.attempts}: rejected ({reason})")
+                    item.labels.append(_rejection_label(item.attempts, reason))
+                    item.checks = []
+                    item.observed = {}
+                    item.final_variant = None
                     terminal = item.attempts >= limit
                     _record(
                         store,
@@ -353,11 +356,10 @@ def _repair(
             status, reason, variant_feedback = _with_variants(status, reason, report)
             reason_text = _redact(reason, tokens)
             verdict = _verdict_name(status)
-            item.labels.append(_attempt_label(item.attempts, verdict, reason_text))
+            item.labels.append(_history_label(item.attempts, status, reason_text, report))
             item.checks = list(checks)
             item.observed = after
-            if report is not None and _show_variant_line(status, report):
-                item.variant_history.append(report.line)
+            item.final_variant = report
             stored_variants = "[]" if report is None else _redact(report.to_json(), tokens)
             _record(
                 store,
@@ -384,7 +386,7 @@ def _repair(
                 _export_verified_test(item, config, store, tokens)
     for item in tracked:
         if item.labels:
-            print(_redact(" -> ".join(item.labels), tokens))
+            print(_redact(" | ".join(item.labels), tokens))
         if item.declined:
             print(
                 _redact(
@@ -404,10 +406,9 @@ def _repair(
                 item.observed,
                 owners,
                 details,
+                verdict=_combined_verdict(item.final_status, item.final_reason, item.final_variant),
             )
-            if item.variant_history:
-                report_text = report_text + "\n" + "\n".join(item.variant_history)
-            print(_redact(_wrap(report_text), tokens))
+            print(_redact(report_text, tokens))
         elif item.final_status == "Verification failed":
             print(_redact(f"VERIFICATION FAILED: {item.final_reason}", tokens))
 
@@ -516,18 +517,33 @@ def _with_variants(status: str, reason: str, report: VariantReport | None) -> tu
     return status, reason, ""
 
 
-def _show_variant_line(status: str, report: VariantReport) -> bool:
-    if report.outcome == "bypass":
-        return True
-    if report.outcome == "inconclusive":
-        return status == "Inconclusive"
-    return status == "Verified"
+def _rejection_label(number: int, reason: str) -> str:
+    if "not JSON" in reason:
+        return f"Attempt {number}: not JSON"
+    return f"Attempt {number}: rejected ({reason})"
 
 
-def _attempt_label(number: int, verdict: str, reason: str) -> str:
-    if verdict == "VERIFIED":
+def _history_label(number: int, status: str, reason: str, report: VariantReport | None) -> str:
+    """One history entry. A failed bypass check is never labeled Verified."""
+    if report is not None and report.outcome == "bypass":
+        return f"Attempt {number}: {report.reason}"
+    if status == "Verified" and report is not None and report.outcome == "hardened":
+        return f"Attempt {number}: VERIFIED and HARDENED"
+    if status == "Verified":
         return f"Attempt {number}: VERIFIED"
-    return f"Attempt {number}: {verdict} ({reason})"
+    if status == "Inconclusive":
+        return f"Attempt {number}: INCONCLUSIVE ({reason})"
+    return f"Attempt {number}: VERIFICATION FAILED ({reason})"
+
+
+def _combined_verdict(status: str, reason: str, report: VariantReport | None) -> str:
+    """The single verdict for the final attempt, including the bypass check when it ran."""
+    if status == "Verified" and report is not None and report.outcome == "hardened":
+        return (
+            "VERIFIED and HARDENED: exploit blocked, owner access works, regression clean, "
+            f"{len(report.results)} bypass variants blocked"
+        )
+    return _verdict(status, reason)
 
 
 def _verdict_name(status: str) -> str:
@@ -851,6 +867,7 @@ def _report(
     after: dict[str, TestResult],
     owners: dict[str, str],
     details: bool,
+    verdict: str | None = None,
 ) -> str:
     """Compact before/after counts. Full request lines are printed only with details."""
     rows: list[tuple[str, str, str]] = []
@@ -872,7 +889,11 @@ def _report(
                 detail_lines.extend(f"  {_detail_line(case, after.get(case.id))}" for case in group)
             else:
                 detail_lines.append("  not run")
-    lines = [f"Finding: {finding.method} {finding.route}", _count_table(rows), _verdict(status, reason)]
+    lines = [
+        f"Finding: {finding.method} {finding.route}",
+        _count_table(rows),
+        verdict if verdict is not None else _verdict(status, reason),
+    ]
     if detail_lines:
         lines.append("\n".join(detail_lines))
     return _wrap("\n".join(lines))

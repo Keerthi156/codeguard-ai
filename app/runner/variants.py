@@ -152,13 +152,17 @@ def summarize(results: Sequence[VariantResult]) -> VariantReport:
         hit = bypasses[0]
         status = "-" if hit.status_code is None else str(hit.status_code)
         request = f"{hit.variant.method} {hit.variant.path} as {hit.variant.identity}"
-        reason = f"bypass found: {request} -> {status}"
+        reason = f"bypass found via {request} -> {status}"
         return VariantReport(
             outcome="bypass",
             results=tuple(results),
             line=f"Bypass check: BYPASS FOUND via {request} -> {status}",
             reason=reason,
-            model_feedback=f"{reason}\nresponse: {status} {hit.body}",
+            model_feedback=(
+                f"{reason}\n"
+                f"response: {status} {hit.body}\n"
+                "Every method on the same resource path needs the same owner check."
+            ),
         )
     if not results or any(item.classification == "inconclusive" for item in results):
         return VariantReport(

@@ -78,6 +78,7 @@ def test_status_rules() -> None:
     assert opened.line == "Bypass check: BYPASS FOUND via PUT /documents/101 as bob -> 200"
     assert "PUT /documents/101" in opened.model_feedback
     assert "200" in opened.model_feedback
+    assert "Every method on the same resource path needs the same owner check." in opened.model_feedback
 
     mixed = summarize([_result(variant, 500), _result(variant, 200)])
     assert mixed.outcome == "bypass"
