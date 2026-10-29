@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+from pathlib import Path
 from typing import Iterator
 
 import pytest
@@ -42,6 +43,12 @@ def fixture_apps() -> dict[str, object]:
 @pytest.fixture(scope="session", autouse=True)
 def _preload_fixture_apps(fixture_apps: dict[str, object]) -> Iterator[None]:
     yield
+
+
+@pytest.fixture(autouse=True)
+def _isolate_regression_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep verified-fix exports out of the repository during tests."""
+    monkeypatch.setenv("CODEGUARD_REGRESSION_DIR", str(tmp_path / "regression_tests"))
 
 
 def use_server(server: str, monkeypatch: pytest.MonkeyPatch) -> None:

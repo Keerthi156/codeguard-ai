@@ -362,6 +362,8 @@ def _repair(
             item.done = True
             item.final_status = status
             item.final_reason = reason_text
+            if status == "Verified":
+                _export_verified_test(item, config, store, tokens)
     for item in tracked:
         if item.labels:
             print(_redact(" -> ".join(item.labels), tokens))
@@ -392,6 +394,26 @@ def _repair(
             )
         elif item.final_status == "Verification failed":
             print(_redact(f"VERIFICATION FAILED: {item.final_reason}", tokens))
+
+
+def _export_verified_test(
+    item: _Tracked,
+    config: TargetConfig,
+    store: FindingStore,
+    tokens: Sequence[str],
+) -> None:
+    if item.proposal is None:
+        return
+    from app.findings.regression import export_verified
+
+    path = export_verified(
+        item.finding.model_copy(update={"status": "Verified"}),
+        config,
+        root_cause=_redact(item.proposal.root_cause, tokens),
+        db_path=store.path,
+    )
+    if path is not None:
+        print(_redact(f"Regression test: {path.name}", tokens))
 
 
 def _run_patched(
