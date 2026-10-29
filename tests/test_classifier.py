@@ -13,7 +13,7 @@ import fixtures.vulnerable_api.app as vulnerable_api
 from app.ai.mock_provider import MockProvider
 from app.analyzer.auth_checks import RouteFinding, assess_routes
 from app.findings.classifier import classify, evidence_line
-from app.runner.executor import TestResult, execute_plan
+from app.runner.executor import Evidence, TestResult, execute_plan
 from app.schemas import Resource, User, default_owner_only_matrix
 from app.target_config import load_target_config
 
@@ -130,6 +130,85 @@ async def test_server_error_is_inconclusive() -> None:
     assert get_finding.status == "Inconclusive"
 
 
+def test_exploit_and_owner_control_stay_confirmed_when_unauthenticated_is_denied() -> None:
+    findings = classify([_route()], [_owner(), _exploit(), _unauthenticated(401, "denied", True, "pass")], _matrix())
+
+    assert len(findings) == 1
+    assert findings[0].status == "Confirmed"
+    assert findings[0].coverage_gaps == []
+    assert evidence_line(findings[0].evidence[0]).startswith("EXPLOIT: GET /documents/101 ")
+    assert "GET/documents" not in evidence_line(findings[0].evidence[0])
+
+
+def test_failing_owner_control_stays_inconclusive_when_the_exploit_was_allowed() -> None:
+    owner = _result("get-101-owner-alice", "alice", "/documents/101", 404, "denied", False, "fail")
+    findings = classify([_route()], [owner, _exploit(), _unauthenticated(401, "denied", True, "pass")], _matrix())
+
+    assert findings[0].status == "Inconclusive"
+    assert findings[0].status != "Confirmed"
+
+
+def test_server_error_on_an_exploit_is_not_confirmed() -> None:
+    crashed = TestResult(
+        test_id="get-101-non-owner-bob",
+        status_code=500,
+        access=None,
+        matches_expected=None,
+        outcome="inconclusive",
+        evidence=Evidence(
+            method="GET",
+            path="/documents/101",
+            identity="bob",
+            status_code=500,
+            body="unavailable",
+        ),
+    )
+
+    findings = classify([_route()], [_owner(), crashed], _matrix())
+
+    assert findings[0].status == "Inconclusive"
+    assert findings[0].status != "Confirmed"
+
+
+def test_coverage_gaps_do_not_cancel_a_confirmed_exploit() -> None:
+    gap = TestResult(
+        test_id="get-101-extra",
+        status_code=None,
+        access=None,
+        matches_expected=None,
+        outcome="inconclusive",
+        evidence=Evidence(
+            method="GET",
+            path="/documents/101",
+            identity="bob",
+            status_code=None,
+            body="timeout",
+        ),
+    )
+
+    findings = classify([_route()], [_owner(), _exploit(), gap], _matrix())
+
+    assert findings[0].status == "Confirmed"
+    assert len(findings[0].coverage_gaps) == 1
+    assert findings[0].coverage_gaps[0].startswith("GET /documents/101 ")
+    from app.cli import _evidence_lines
+
+    assert "Coverage gaps: 1" in _evidence_lines(findings[0])
+
+
+def test_evidence_line_keeps_a_space_after_the_method() -> None:
+    glued = Evidence(
+        method="GET",
+        path="GET/documents/101",
+        identity="unauthenticated",
+        status_code=401,
+        body="",
+        label="DENIED",
+    )
+
+    assert evidence_line(glued) == "DENIED: GET /documents/101 as unauthenticated -> 401 (access denied)"
+
+
 def test_correctly_denied_attacks_are_not_reproduced() -> None:
     matrix = default_owner_only_matrix().model_copy(
         update={
@@ -155,6 +234,48 @@ def test_correctly_denied_attacks_are_not_reproduced() -> None:
     assert len(findings) == 1
     assert findings[0].status == "Suspected"
     assert findings[0].reason == "Suspected, not reproduced"
+
+
+def _route() -> RouteFinding:
+    return RouteFinding(
+        file="app.py",
+        function_name="get_document",
+        method="GET",
+        path="/documents/{id}",
+        status="Suspected",
+        reason="Static indicator only.",
+        confidence="medium",
+        line_numbers=[74, 77],
+    )
+
+
+def _matrix():
+    return default_owner_only_matrix().model_copy(
+        update={
+            "users": [User(name="alice", token="alice-token"), User(name="bob", token="bob-token")],
+            "resources": [Resource(id="101", owner="alice")],
+        }
+    )
+
+
+def _owner() -> TestResult:
+    return _result("get-101-owner-alice", "alice", "/documents/101", 200, "allowed", True, "pass")
+
+
+def _exploit() -> TestResult:
+    return _result("get-101-non-owner-bob", "bob", "/documents/101", 200, "allowed", False, "fail")
+
+
+def _unauthenticated(status_code: int, access: str, matches: bool, outcome: str) -> TestResult:
+    return _result(
+        "get-101-unauthenticated",
+        "unauthenticated",
+        "/documents/101",
+        status_code,
+        access,
+        matches,
+        outcome,
+    )
 
 
 def _result(

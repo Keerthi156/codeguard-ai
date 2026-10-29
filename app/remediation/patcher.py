@@ -23,7 +23,7 @@ from pydantic import BaseModel, ConfigDict
 from app.analyzer.auth_checks import RouteFinding
 from app.config import Settings, load_settings
 from app.findings.classifier import Finding
-from app.schemas import AuthorizationMatrix
+from app.schemas import AuthorizationMatrix, OperationRules
 
 logger = logging.getLogger(__name__)
 logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -93,6 +93,35 @@ class CannedPatch:
                 f"{_CANNED_LABEL}: a non-owner receives 404. The original tree is not modified."
             ),
         }
+
+
+def materialize(source_dir: str | Path, patches: Sequence[tuple[str, str]]) -> Path:
+    """Copy ``source_dir`` and apply diffs there. The original directory is not modified.
+
+    Diffs for one file are applied from the bottom of the file upward so an
+    earlier hunk still matches after a later one has been applied.
+    """
+    root = Path(source_dir)
+    destination = _copy_tree(root)
+    try:
+        grouped: dict[str, list[str]] = {}
+        for relative, diff in patches:
+            grouped.setdefault(_clean_relative(relative), []).append(diff)
+        for relative, diffs in grouped.items():
+            text = (destination / relative).read_text(encoding="utf-8")
+            ordered = sorted(diffs, key=lambda item: _first_hunk(item, relative), reverse=True)
+            for diff in ordered:
+                text = _checked_text(text, diff, relative)
+            (destination / relative).write_text(text, encoding="utf-8")
+    except Exception:
+        shutil.rmtree(destination, ignore_errors=True)
+        raise
+    return destination
+
+
+def _first_hunk(diff: str, relative: str) -> int:
+    hunks, _changed = _parse_diff(diff, relative)
+    return hunks[0][0]
 
 
 def propose_patch(
@@ -325,8 +354,7 @@ def _copy_tree(source_dir: Path) -> Path:
 
 def _rewrite_document_handler(source: str, method: str, line_numbers: Sequence[int]) -> str:
     lines = source.splitlines(keepends=True)
-    start = min(line_numbers)
-    end = max(line_numbers)
+    start, end = _handler_span(source, line_numbers)
     if start < 1 or end > len(lines) or start > end:
         raise PatchRejected(f"{_CANNED_LABEL} line numbers are outside the file")
     chunk = "".join(lines[start - 1 : end])
@@ -334,6 +362,29 @@ def _rewrite_document_handler(source: str, method: str, line_numbers: Sequence[i
     if rewritten == chunk:
         raise PatchRejected(f"{_CANNED_LABEL} did not match the document fixture handler")
     return "".join(lines[: start - 1]) + rewritten + "".join(lines[end:])
+
+
+def _handler_span(source: str, line_numbers: Sequence[int]) -> tuple[int, int]:
+    """Line range of the handler, ignoring helper lines that share the signal set."""
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        raise PatchRejected(f"{_CANNED_LABEL} line numbers are outside the file") from None
+    numbers = set(line_numbers)
+    chosen: tuple[int, int] | None = None
+    overlap = 0
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) or node.end_lineno is None:
+            continue
+        shared = len(set(range(node.lineno, node.end_lineno + 1)) & numbers)
+        if shared > overlap:
+            overlap = shared
+            chosen = (node.lineno, node.end_lineno)
+    if chosen is None or overlap == 0:
+        if not line_numbers:
+            raise PatchRejected(f"{_CANNED_LABEL} needs the handler line numbers")
+        return min(line_numbers), max(line_numbers)
+    return chosen
 
 
 def _owner_check(chunk: str, method: str) -> str:
@@ -461,17 +512,19 @@ def _matrix_view(matrix: AuthorizationMatrix) -> dict[str, object]:
     return {
         "identities": [user.name for user in matrix.users],
         "resources": [{"id": resource.id, "owner": resource.owner} for resource in matrix.resources],
-        "read": {
-            "owner": matrix.read.owner.expected,
-            "non_owner": matrix.read.non_owner.expected,
-            "unauthenticated": matrix.read.unauthenticated.expected,
-        },
-        "write": {
-            "owner": matrix.write.owner.expected,
-            "non_owner": matrix.write.non_owner.expected,
-            "unauthenticated": matrix.write.unauthenticated.expected,
-        },
+        "read": _rule_view(matrix.read),
+        "write": _rule_view(matrix.write),
     }
+
+
+def _rule_view(rules: OperationRules) -> dict[str, str]:
+    values = {
+        "owner": rules.owner.expected,
+        "non_owner": rules.non_owner.expected,
+    }
+    if rules.unauthenticated is not None:
+        values["unauthenticated"] = rules.unauthenticated.expected
+    return values
 
 
 def _import_roots(tree: ast.AST) -> set[str]:

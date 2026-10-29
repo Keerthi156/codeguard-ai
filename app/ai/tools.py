@@ -86,8 +86,10 @@ def _exact_keys(args: dict[str, object], allowed: frozenset[str]) -> None:
 
 
 def _rules(rules: OperationRules) -> dict[str, str]:
-    return {
+    values = {
         "owner": rules.owner.expected,
         "non_owner": rules.non_owner.expected,
-        "unauthenticated": rules.unauthenticated.expected,
     }
+    if rules.unauthenticated is not None:
+        values["unauthenticated"] = rules.unauthenticated.expected
+    return values

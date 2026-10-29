@@ -5,6 +5,7 @@ as a localhost uvicorn process, and only after the config and test plan pass
 validation.
 
     python -m app.cli scan --config fixtures/codeguard.vulnerable.yaml
+    python -m app.cli fix --config fixtures/codeguard.vulnerable.yaml
 """
 
 from __future__ import annotations
@@ -25,6 +26,7 @@ import yaml
 from pydantic import ValidationError
 
 from app.ai.factory import get_provider
+from app.ai.required_plan import supplement_plan
 from app.ai.model_run import ModelRun
 from app.ai.validator import validate_plan
 from app.analyzer.auth_checks import assess_routes
@@ -76,7 +78,12 @@ class _StartedTarget:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """Run the CLI. Returns 0, 1, or 2."""
+    """Run the CLI.
+
+    ``scan`` returns 0, 1, or 2. ``fix`` returns 0 when every approved finding
+    is Verified, 1 when a check fails or is inconclusive, 2 on config or
+    validation errors, and 3 when the user declines a patch.
+    """
     parser = _parser()
     try:
         args = parser.parse_args(list(argv) if argv is not None else None)
@@ -84,6 +91,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         code = exc.code
         return code if isinstance(code, int) else 2
     try:
+        if args.command == "fix":
+            from app.remediation.verifier import run_fix
+
+            return run_fix(
+                args.config,
+                db_path=args.db,
+                canned=bool(args.canned_patch),
+                details=bool(args.details),
+            )
         return _scan(
             args.config,
             start_server=not args.no_start,
@@ -114,6 +130,19 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="propose a labeled CannedPatch owner check for the document fixtures; does not call the model",
     )
+    fix = subcommands.add_parser("fix", help="propose a patch and verify it on a temporary copy")
+    fix.add_argument("--config", required=True, help="path to a codeguard YAML file")
+    fix.add_argument("--db", default=str(DEFAULT_DB_PATH), help="SQLite database path")
+    fix.add_argument(
+        "--canned-patch",
+        action="store_true",
+        help="use the labeled CannedPatch owner check; does not call the model",
+    )
+    fix.add_argument(
+        "--details",
+        action="store_true",
+        help="print each request in the fix gate; the saved record always has them",
+    )
     return parser
 
 
@@ -131,11 +160,17 @@ def _scan(config_path: str, *, start_server: bool, db_path: str, canned_patch: b
         _print_model_run(provider.model_run(), tokens)
         raise _UsageError(_redact(str(exc), tokens)) from exc
     validated = validate_plan(plan, routes, config.matrix(), config)
+    model_cases, model_tests, required_tests = supplement_plan(
+        validated.accepted,
+        route_findings,
+        config.matrix(),
+        config,
+    )
     model_run = provider.model_run().with_counts(
         proposed=_proposed_count(plan),
         accepted=len(validated.accepted),
         rejected=len(validated.rejected),
-    )
+    ).with_sources(model_tests=model_tests, required_tests=required_tests)
     if validated.rejected:
         detail = "; ".join(f"{item.id}: {', '.join(item.reasons)}" for item in validated.rejected)
         _print_model_run(model_run, tokens)
@@ -145,7 +180,7 @@ def _scan(config_path: str, *, start_server: bool, db_path: str, canned_patch: b
     try:
         if start_server:
             started = _start_target(config, source_dir, tokens)
-        results = asyncio.run(execute_plan(validated.accepted, config))
+        results = asyncio.run(execute_plan(model_cases, config))
         findings = classify(route_findings, results, config.matrix())
         FindingStore(db_path).save_scan(findings, results, model_run)
     except _UsageError:
@@ -322,13 +357,20 @@ def _wait_until_ready(base_url: str, started: _StartedTarget) -> None:
     raise _UsageError("target app did not become ready")
 
 
+def _evidence_lines(finding: Finding) -> list[str]:
+    lines = [evidence_line(item) for item in finding.evidence] or ["-"]
+    if finding.coverage_gaps:
+        lines.append(f"Coverage gaps: {len(finding.coverage_gaps)}")
+    return lines
+
+
 def _print_report(findings: Sequence[Finding], tokens: Sequence[str], model_run: ModelRun) -> None:
     prepared = [
         (
             f"{finding.method} {finding.route}",
             finding.status,
             _clip(finding.reason, 70),
-            [evidence_line(item) for item in finding.evidence] or ["-"],
+            _evidence_lines(finding),
         )
         for finding in findings
     ]

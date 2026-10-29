@@ -61,6 +61,8 @@ def test_vulnerable_scan_reports_confirmed_findings(mock_ai: None, tmp_path: Pat
         assert exploit in line
         assert captured.out.index(exploit) < captured.out.index(control)
     assert "2 findings, 2 confirmed" in captured.out
+    assert "Model tests: 8" in captured.out
+    assert "Required tests: 10" in captured.out
     assert "Provider: MOCK (development only)" in captured.out
     assert captured.out.index("2 findings, 2 confirmed") < captured.out.index("Model run")
     _assert_no_tokens(captured.out, captured.err)

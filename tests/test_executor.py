@@ -7,7 +7,7 @@ from pathlib import Path
 
 import httpx
 import pytest
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 
 from app.ai.mock_provider import MockProvider
 from app.analyzer.auth_checks import assess_routes
@@ -148,6 +148,36 @@ async def test_timeout_and_server_error_are_inconclusive() -> None:
     assert failed[0].status_code == 500
     assert failed[0].access is None
     assert "alice-token" not in failed[0].model_dump_json()
+
+
+async def test_unauthenticated_identity_sends_no_authorization_header() -> None:
+    captured: list[httpx.Headers] = []
+    app = FastAPI()
+
+    @app.get("/documents/{id}")
+    def read_document(id: int, request: Request) -> None:
+        captured.append(request.headers)
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    config = _config("vulnerable")
+    case = TestCase(
+        id="get-101-unauthenticated",
+        route="/documents/{id}",
+        method="GET",
+        identity="unauthenticated",
+        resource_id="101",
+        expected="deny",
+        reason="an unauthenticated caller is denied",
+    )
+
+    results = await execute_plan([case], config, transport=httpx.ASGITransport(app=app))
+
+    assert results[0].status_code == 401
+    assert results[0].access == "denied"
+    assert results[0].outcome == "pass"
+    assert captured
+    assert "authorization" not in {name.lower() for name in captured[0].keys()}
+    assert f"{results[0].evidence.method} {results[0].evidence.path}" == "GET /documents/101"
 
 
 def _assert_result_is_sanitized(case: TestCase, result: TestResult, config: TargetConfig) -> None:

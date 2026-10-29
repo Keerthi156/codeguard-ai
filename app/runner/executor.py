@@ -99,16 +99,20 @@ async def _execute_one(
     except _Refused:
         return _inconclusive(test, None, _REFUSAL, token_values)
 
-    token = tokens.get(test.identity)
-    if token is None:
-        return _inconclusive(test, path, "unknown identity", token_values)
+    if test.identity == "unauthenticated":
+        headers: dict[str, str] = {}
+    else:
+        token = tokens.get(test.identity)
+        if token is None:
+            return _inconclusive(test, path, "unknown identity", token_values)
+        headers = {"Authorization": f"Bearer {token}"}
 
     try:
         response = await asyncio.wait_for(
             client.request(
                 test.method,
                 path,
-                headers={"Authorization": f"Bearer {token}"},
+                headers=headers,
                 json=_SYNTHETIC_BODY if test.method in _WRITE_METHODS else None,
             ),
             timeout=timeout,

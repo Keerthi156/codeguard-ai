@@ -1,8 +1,9 @@
 """Turn static route findings and executed tests into finding records.
 
-A route is Confirmed only when a non-owner or unauthenticated caller received
-access the matrix denies and the owner control for that route passed. Timeouts,
-failed owner controls, and 5xx responses stay Inconclusive.
+A route is Confirmed when an exploit test shows access the matrix denies and
+the owner control for that route passed. Other inconclusive tests are coverage
+gaps. A failed or inconclusive owner control is never Confirmed. Timeouts,
+crashes, and 5xx responses are never exploit evidence.
 """
 
 from __future__ import annotations
@@ -47,6 +48,7 @@ class Finding(BaseModel):
     status: FindingStatus
     reason: str
     evidence: list[Evidence] = Field(default_factory=list)
+    coverage_gaps: list[str] = Field(default_factory=list)
     source_lines: list[int] = Field(default_factory=list)
     created_at: datetime
     target_revision: str | None = None
@@ -76,7 +78,7 @@ def classify(
         decision = _decide(group, matched, matrix)
         if decision is None:
             continue
-        status, reason = decision
+        status, reason, gaps = decision
         findings.append(
             Finding(
                 id=_finding_id(group.method, group.route),
@@ -85,6 +87,7 @@ def classify(
                 status=status,
                 reason=reason,
                 evidence=_ordered_evidence(group, matched, matrix, tokens),
+                coverage_gaps=gaps,
                 source_lines=sorted(set(group.source_lines)),
                 created_at=created_at,
                 target_revision=revision,
@@ -145,51 +148,61 @@ def _decide(
     group: _RouteGroup,
     results: Sequence[TestResult],
     matrix: AuthorizationMatrix,
-) -> tuple[FindingStatus, str] | None:
+) -> tuple[FindingStatus, str, list[str]] | None:
     users = {user.name for user in matrix.users}
     rules = matrix.read if group.method in _READ_METHODS else matrix.write
-    inconclusive = False
     owner_passed = False
-    owner_failed = False
+    owner_blocked = False
     reproduced = False
+    needed_inconclusive = False
     denied_correctly = False
+    gaps: list[str] = []
 
     for result in results:
         resource = _resource_for_path(group.route, result.evidence.path, matrix.resources)
-        if resource is None:
+        condition = None if resource is None else _condition(result.evidence.identity, resource.owner, users)
+        rule = None if condition is None else getattr(rules, condition)
+        required = None if rule is None else rule.expected
+        if _is_inconclusive(result):
+            if _is_needed(condition, required):
+                if condition == "owner":
+                    owner_blocked = True
+                else:
+                    needed_inconclusive = True
+            gaps.append(_gap(result))
             continue
-        if result.outcome == "inconclusive" or result.access is None or _is_server_error(result.status_code):
-            inconclusive = True
+        if condition is None or required is None or result.access is None:
             continue
-        condition = _condition(result.evidence.identity, resource.owner, users)
-        if condition is None:
-            continue
-        required = getattr(rules, condition).expected
         if condition == "owner" and required == "allow":
             if result.access == "allowed" and result.outcome == "pass":
                 owner_passed = True
             else:
-                owner_failed = True
+                owner_blocked = True
         if condition in {"non_owner", "unauthenticated"} and required == "deny":
             if result.access == "allowed":
                 reproduced = True
             elif result.access == "denied":
                 denied_correctly = True
 
-    if inconclusive:
-        return "Inconclusive", "A needed test was inconclusive, so this route is Inconclusive."
-    if owner_failed:
-        return "Inconclusive", "The owner control test failed, so this route is Inconclusive."
+    if owner_blocked:
+        return (
+            "Inconclusive",
+            "The owner control test failed or was inconclusive, so this route is Inconclusive.",
+            [],
+        )
     if reproduced and owner_passed:
         return (
             "Confirmed",
             "A non-owner or unauthenticated caller received access the matrix denies, "
             "and the owner control test for this route passed.",
+            _unique(gaps),
         )
+    if not reproduced and needed_inconclusive:
+        return "Inconclusive", "A needed test was inconclusive, so this route is Inconclusive.", []
     if group.suspected and denied_correctly and not reproduced:
-        return "Suspected", "Suspected, not reproduced"
+        return "Suspected", "Suspected, not reproduced", []
     if group.suspected:
-        return "Suspected", group.static_reason or "Static heuristics marked this route Suspected."
+        return "Suspected", group.static_reason or "Static heuristics marked this route Suspected.", []
     return None
 
 
@@ -211,6 +224,45 @@ def _resource_for_path(template: str, concrete: str, resources: Sequence[Resourc
     return None
 
 
+def _is_inconclusive(result: TestResult) -> bool:
+    if result.outcome == "inconclusive" or result.access is None:
+        return True
+    return _is_server_error(result.status_code)
+
+
+def _is_needed(condition: str | None, required: str | None) -> bool:
+    if condition == "owner":
+        return required == "allow"
+    return condition in {"non_owner", "unauthenticated"} and required == "deny"
+
+
+def _gap(result: TestResult) -> str:
+    status = "-" if result.status_code is None else str(result.status_code)
+    detail = " ".join(result.evidence.body.split())
+    head = f"{_request(result.evidence.method, result.evidence.path)} as {result.evidence.identity} -> {status}"
+    return f"{head}, {detail}" if detail else head
+
+
+def _request(method: str, path: str) -> str:
+    """Return ``GET /documents/101``, including when the path was stored glued to the verb."""
+    verb = method.strip().upper()
+    target = path.strip()
+    if target.upper().startswith(verb + "/"):
+        target = target[len(verb) :]
+    return f"{verb} {target}"
+
+
+def _unique(items: list[str]) -> list[str]:
+    seen: set[str] = set()
+    unique: list[str] = []
+    for item in items:
+        if item in seen:
+            continue
+        seen.add(item)
+        unique.append(item)
+    return unique
+
+
 def _is_server_error(status_code: int | None) -> bool:
     return status_code is not None and status_code >= 500
 
@@ -223,7 +275,7 @@ def _finding_id(method: str, route: str) -> str:
 def evidence_line(item: Evidence) -> str:
     """One labeled evidence line. The body snippet stays truncated."""
     status = "-" if item.status_code is None else str(item.status_code)
-    head = f"{item.method} {item.path} as {item.identity} -> {status}"
+    head = f"{_request(item.method, item.path)} as {item.identity} -> {status}"
     base = f"{item.label}: {head}" if item.label else head
     if item.label == "EXPLOIT":
         owner = _body_owner(item.body)
