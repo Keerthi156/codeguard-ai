@@ -133,6 +133,26 @@ def _block_after(text: str, history: str) -> str:
     return block
 
 
+def _result_sections(text: str) -> dict[str, str]:
+    """Result blocks keyed by ``METHOD /route``. Proposal headers include the finding id."""
+    lines = text.splitlines()
+    indexes = [
+        index
+        for index, line in enumerate(lines)
+        if line.startswith("Finding: ") and "(" not in line
+    ]
+    sections: dict[str, str] = {}
+    for position, index in enumerate(indexes):
+        begin = index - 1 if index > 0 and lines[index - 1].startswith("Attempt ") else index
+        end = len(lines)
+        if position + 1 < len(indexes):
+            next_index = indexes[position + 1]
+            end = next_index - 1 if lines[next_index - 1].startswith("Attempt ") else next_index
+        header = lines[index].removeprefix("Finding: ").strip()
+        sections[header] = "\n".join(lines[begin:end])
+    return sections
+
+
 def _original() -> str:
     return (SOURCE / "app.py").read_text(encoding="utf-8")
 
@@ -357,6 +377,8 @@ def test_canned_patch_is_verified(
     assert collapsed.count(
         "VERIFIED and HARDENED: exploit blocked, owner access works, regression clean, 14 bypass variants blocked"
     ) == 2
+    assert captured.out.count("Finding: GET /documents/{id}\n") == 1
+    assert captured.out.count("Finding: PUT /documents/{id}\n") == 1
     assert " as bob:" not in captured.out
     assert all(len(line) <= 100 for line in captured.out.splitlines() if line.startswith(("Finding:", "exploit", "owner control", "regression", "VERIFIED", "check")))
     _assert_original_unchanged(before)
@@ -794,6 +816,9 @@ def test_final_block_omits_verified_when_the_bypass_check_failed(
     assert "VERIFIED" not in history
     assert "VERIFIED" not in block
     assert "VERIFICATION FAILED:" in block
+    sections = _result_sections(captured.out)
+    assert "bypass found via PUT /documents/101 as bob -> 200" in sections["GET /documents/{id}"]
+    assert "bypass found via PUT /documents/101 as bob -> 200" not in sections["PUT /documents/{id}"]
     _assert_original_unchanged(before)
     _assert_no_tokens(captured.out + captured.err, database)
 
@@ -967,6 +992,85 @@ def _observed(case: TestCase, status_code: int) -> TestResult:
             body="",
         ),
     )
+
+
+def test_declined_sibling_is_not_repaired_on_the_approved_route(
+    mock_ai: None,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    use_server("asgi", monkeypatch)
+    before = _snapshot(SOURCE)
+    database = tmp_path / "codeguard.db"
+
+    code = run_fix(
+        str(_config(tmp_path)),
+        db_path=database,
+        canned=True,
+        approve=lambda proposal: proposal.finding_id == "put-documents-id",
+    )
+    captured = capsys.readouterr()
+    sections = _result_sections(captured.out)
+    get_section = sections["GET /documents/{id}"]
+    put_section = sections["PUT /documents/{id}"]
+    verdict = "NOT HARDENED: sibling route GET /documents/{id} is still open (declined or unfixed)"
+
+    assert code == 3
+    assert list(sections) == ["GET /documents/{id}", "PUT /documents/{id}"]
+    assert captured.out.count("Finding: GET /documents/{id}\n") == 1
+    assert captured.out.count("Finding: PUT /documents/{id}\n") == 1
+    assert get_section.count("DECLINED: no patch applied, route still vulnerable") == 1
+    assert "bypass found via" not in get_section
+    assert "Before" not in get_section
+    assert put_section.count(verdict) == 1
+    assert "bypass found via GET /documents/101 as bob -> 200" in put_section
+    assert put_section.count("Finding: PUT /documents/{id}") == 1
+    assert "Attempt 2" not in captured.out
+    assert "0 verified, 0 verification failed, 0 inconclusive, 1 declined" in captured.out
+    assert "Hint: a declined or failed route stays vulnerable until that route is approved and verified." in captured.out
+    _assert_original_unchanged(before)
+    _assert_no_tokens(captured.out + captured.err, database)
+    with sqlite3.connect(database) as connection:
+        statuses = dict(connection.execute("SELECT id, status FROM findings").fetchall())
+        attempts = connection.execute(
+            "SELECT finding_id, attempt FROM verifications ORDER BY finding_id, attempt"
+        ).fetchall()
+    assert statuses["get-documents-id"] == "Fix proposed"
+    assert statuses["put-documents-id"] == "Confirmed"
+    assert attempts == [("get-documents-id", 1), ("put-documents-id", 1)]
+
+
+def test_approving_both_good_patches_verifies_each_route_once(
+    mock_ai: None,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    use_server("asgi", monkeypatch)
+    before = _snapshot(SOURCE)
+    database = tmp_path / "codeguard.db"
+
+    code = run_fix(
+        str(_config(tmp_path)),
+        db_path=database,
+        canned=True,
+        approve=lambda _proposal: True,
+    )
+    captured = capsys.readouterr()
+    sections = _result_sections(captured.out)
+    hardened = (
+        "VERIFIED and HARDENED: exploit blocked, owner access works, regression clean, "
+        "14 bypass variants blocked"
+    )
+
+    assert code == 0
+    assert list(sections) == ["GET /documents/{id}", "PUT /documents/{id}"]
+    assert " ".join(sections["GET /documents/{id}"].split()).count(hardened) == 1
+    assert " ".join(sections["PUT /documents/{id}"].split()).count(hardened) == 1
+    assert "DECLINED:" not in captured.out
+    assert "Hint:" not in captured.out
+    _assert_original_unchanged(before)
 
 
 def _proposal():
