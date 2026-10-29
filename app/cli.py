@@ -6,6 +6,7 @@ validation.
 
     python -m app.cli scan --config fixtures/codeguard.vulnerable.yaml
     python -m app.cli fix --config fixtures/codeguard.vulnerable.yaml
+    python -m app.cli regress --config fixtures/codeguard.vulnerable.yaml
 """
 
 from __future__ import annotations
@@ -100,6 +101,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 canned=bool(args.canned_patch),
                 details=bool(args.details),
             )
+        if args.command == "regress":
+            from app.findings.regression import run_regress
+
+            return run_regress(args.config, source_dir=args.source_dir, db_path=args.db)
         return _scan(
             args.config,
             start_server=not args.no_start,
@@ -143,6 +148,14 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="print each request in the fix gate; the saved record always has them",
     )
+    regress = subcommands.add_parser("regress", help="run saved regression tests against a local target")
+    regress.add_argument("--config", required=True, help="path to a codeguard YAML file")
+    regress.add_argument(
+        "--source-dir",
+        default=None,
+        help="directory to start; defaults to the source_dir in the config",
+    )
+    regress.add_argument("--db", default=str(DEFAULT_DB_PATH), help="SQLite database path")
     return parser
 
 

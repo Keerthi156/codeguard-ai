@@ -65,6 +65,19 @@ CREATE TABLE IF NOT EXISTS verifications (
     verdict TEXT NOT NULL DEFAULT ''
 );
 
+CREATE TABLE IF NOT EXISTS regression_tests (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    finding_id TEXT NOT NULL,
+    method TEXT NOT NULL,
+    route TEXT NOT NULL,
+    operation TEXT NOT NULL,
+    file_path TEXT NOT NULL,
+    root_cause TEXT NOT NULL,
+    policy TEXT NOT NULL,
+    revision TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS test_results (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     finding_id TEXT NOT NULL,
@@ -184,6 +197,56 @@ class FindingStore:
                 ),
             )
             connection.commit()
+
+    def save_regression_test(
+        self,
+        *,
+        finding_id: str,
+        method: str,
+        route: str,
+        operation: str,
+        file_path: str,
+        root_cause: str,
+        policy: str,
+        revision: str,
+        created_at: datetime,
+    ) -> None:
+        """Replace the saved regression-test row for one finding."""
+        with self._connect() as connection:
+            connection.execute("DELETE FROM regression_tests WHERE finding_id = ?", (finding_id,))
+            connection.execute(
+                """
+                INSERT INTO regression_tests (
+                    finding_id, method, route, operation, file_path, root_cause,
+                    policy, revision, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    finding_id,
+                    method,
+                    route,
+                    operation,
+                    file_path,
+                    root_cause,
+                    policy,
+                    revision,
+                    _iso(created_at),
+                ),
+            )
+            connection.commit()
+
+    def load_regression_tests(self) -> list[sqlite3.Row]:
+        """Return saved regression tests in stable route order."""
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT finding_id, method, route, operation, file_path, root_cause,
+                       policy, revision, created_at
+                FROM regression_tests
+                ORDER BY method, route, finding_id
+                """
+            ).fetchall()
+        return list(rows)
 
     def update_finding_status(self, finding_id: str, status: str, reason: str) -> None:
         """Update the stored status after a fix is declined or checked."""
