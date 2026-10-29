@@ -318,6 +318,7 @@ def test_canned_patch_is_verified(
     assert "all allowed (OK)" in captured.out
     assert "0 non-owner allowed" in captured.out
     assert "VERIFIED: exploit blocked, owner access works, regression clean" in captured.out
+    assert captured.out.count("Bypass check: 14 variants, 0 bypasses (HARDENED)") == 2
     assert " as bob:" not in captured.out
     assert all(len(line) <= 100 for line in captured.out.splitlines() if line.startswith(("Finding:", "exploit", "owner control", "regression", "VERIFIED", "check")))
     _assert_original_unchanged(before)
@@ -325,13 +326,17 @@ def test_canned_patch_is_verified(
     _assert_no_tokens(captured.out + captured.err, database)
     with sqlite3.connect(database) as connection:
         rows = connection.execute(
-            "SELECT finding_id, final_status, patch_diff, check_results, created_at FROM verifications ORDER BY finding_id"
+            "SELECT finding_id, final_status, patch_diff, check_results, created_at, variant_results FROM verifications ORDER BY finding_id"
         ).fetchall()
         statuses = connection.execute("SELECT status FROM findings ORDER BY id").fetchall()
     assert [row[0] for row in rows] == ["get-documents-id", "put-documents-id"]
     assert {row[1] for row in rows} == {"Verified"}
     assert statuses == [("Verified",), ("Verified",)]
-    for _finding_id, _status, diff, checks, created_at in rows:
+    for _finding_id, _status, diff, checks, created_at, variants in rows:
+        stored_variants = json.loads(variants)
+        assert stored_variants["outcome"] == "hardened"
+        assert len(stored_variants["variants"]) == 14
+        assert {item["classification"] for item in stored_variants["variants"]} == {"blocked"}
         assert diff.strip()
         parsed = json.loads(checks)
         assert {item["check"] for item in parsed} == {"exploit", "owner", "regression"}
@@ -642,6 +647,124 @@ def test_three_bad_edits_end_as_verification_failed(
     assert {row[0] for row in rows} == {1, 2, 3}
     assert {row[1] for row in rows} == {"rejected"}
     assert {row[2] for row in rows if row[0] == 3} == {"Verification failed"}
+
+
+def test_get_only_patch_reports_a_put_bypass_and_repairs(
+    mock_ai: None,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    use_server("asgi", monkeypatch)
+    before = _snapshot(SOURCE)
+    original = _original()
+    database = tmp_path / "codeguard.db"
+    seen: list[str] = []
+    unchanged = _change_nothing(original)
+    scripts = {
+        "GET": [_owner_edit(original, "GET"), _owner_edit(original, "GET")],
+        "PUT": [unchanged["PUT"][0], _owner_edit(original, "PUT")],
+    }
+    cursors = {method: 0 for method in scripts}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content.decode())
+        content = body["messages"][1]["content"]
+        seen.append(content)
+        message = json.loads(content)
+        method = str(message["method"])
+        queue = scripts[method]
+        index = min(cursors[method], len(queue) - 1)
+        cursors[method] += 1
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {"message": {"role": "assistant", "content": json.dumps(queue[index])}}
+                ]
+            },
+        )
+
+    code = run_fix(
+        str(_config(tmp_path)),
+        db_path=database,
+        approve=lambda _proposal: True,
+        settings=_settings(),
+        transport=httpx.MockTransport(handler),
+    )
+    captured = capsys.readouterr()
+
+    assert code == 0
+    assert "Bypass check: BYPASS FOUND via PUT /documents/101 as bob -> 200" in captured.out
+    assert "Attempt 2: VERIFIED" in captured.out
+    assert any("PUT /documents/101" in item and "as bob" in item and "200" in item for item in seen)
+    _assert_original_unchanged(before)
+    _assert_no_tokens(captured.out + captured.err + "\n".join(seen), database)
+    with sqlite3.connect(database) as connection:
+        rows = connection.execute(
+            "SELECT finding_id, attempt, variant_results FROM verifications WHERE finding_id = ? ORDER BY attempt",
+            ("get-documents-id",),
+        ).fetchall()
+    first = json.loads(rows[0][2])
+    assert rows[0][1] == 1
+    assert first["outcome"] == "bypass"
+    assert any(
+        item["method"] == "PUT" and item["path"] == "/documents/101" and item["classification"] == "bypass"
+        for item in first["variants"]
+    )
+
+
+def test_variant_5xx_is_inconclusive_and_does_not_repair(
+    mock_ai: None,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    use_server("asgi", monkeypatch)
+    before = _snapshot(SOURCE)
+    original = _original()
+    database = tmp_path / "codeguard.db"
+
+    async def errors(variants: object, config: object, **kwargs: object) -> object:
+        from app.runner.variants import execute_variants as real_execute
+
+        async def app(scope: dict[str, object], receive: object, send: object) -> None:
+            del receive
+            if scope["type"] != "http":
+                return
+            await send({"type": "http.response.start", "status": 500, "headers": []})  # type: ignore[operator]
+            await send({"type": "http.response.body", "body": b"error"})  # type: ignore[operator]
+
+        kwargs["transport"] = httpx.ASGITransport(app=app)
+        return await real_execute(variants, config, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr("app.remediation.verifier.execute_variants", errors)
+    code = run_fix(
+        str(_config(tmp_path)),
+        db_path=database,
+        approve=lambda _proposal: True,
+        settings=_settings(),
+        transport=_payloads(
+            {"GET": [_owner_edit(original, "GET")], "PUT": [_owner_edit(original, "PUT")]}
+        ),
+    )
+    captured = capsys.readouterr()
+
+    assert code == 1
+    assert "INCONCLUSIVE: bypass check timed out or returned 5xx" in captured.out
+    assert "Bypass check: 14 variants, inconclusive" in captured.out
+    assert "Attempt 2" not in captured.out
+    assert "BYPASS FOUND" not in captured.out
+    _assert_original_unchanged(before)
+    _assert_no_tokens(captured.out + captured.err, database)
+    with sqlite3.connect(database) as connection:
+        rows = connection.execute("SELECT final_status, variant_results FROM verifications").fetchall()
+    assert rows
+    assert {row[0] for row in rows} == {"Inconclusive"}
+    for _status, payload in rows:
+        stored = json.loads(payload)
+        assert stored["outcome"] == "inconclusive"
+        assert all(item["classification"] == "inconclusive" for item in stored["variants"])
 
 
 def _finding() -> Finding:

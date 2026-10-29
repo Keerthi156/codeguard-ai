@@ -62,7 +62,8 @@ CREATE TABLE IF NOT EXISTS verifications (
     created_at TEXT NOT NULL,
     attempt INTEGER NOT NULL DEFAULT 1,
     failure_reason TEXT NOT NULL DEFAULT '',
-    verdict TEXT NOT NULL DEFAULT ''
+    verdict TEXT NOT NULL DEFAULT '',
+    variant_results TEXT NOT NULL DEFAULT '[]'
 );
 
 CREATE TABLE IF NOT EXISTS regression_tests (
@@ -175,6 +176,7 @@ class FindingStore:
         attempt: int = 1,
         failure_reason: str = "",
         verdict: str = "",
+        variant_results: str = "[]",
     ) -> None:
         """Store one fix attempt. The diff and check text must already be redacted."""
         with self._connect() as connection:
@@ -182,8 +184,8 @@ class FindingStore:
                 """
                 INSERT INTO verifications (
                     finding_id, patch_diff, check_results, final_status, created_at,
-                    attempt, failure_reason, verdict
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    attempt, failure_reason, verdict, variant_results
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     finding_id,
@@ -194,6 +196,7 @@ class FindingStore:
                     attempt,
                     failure_reason,
                     verdict,
+                    variant_results,
                 ),
             )
             connection.commit()
@@ -417,6 +420,7 @@ def _ensure_verification_columns(connection: sqlite3.Connection) -> None:
         ("attempt", "INTEGER NOT NULL DEFAULT 1"),
         ("failure_reason", "TEXT NOT NULL DEFAULT ''"),
         ("verdict", "TEXT NOT NULL DEFAULT ''"),
+        ("variant_results", "TEXT NOT NULL DEFAULT '[]'"),
     )
     for name, declaration in additions:
         if name not in existing:
