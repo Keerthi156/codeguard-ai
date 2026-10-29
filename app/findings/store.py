@@ -238,6 +238,37 @@ class FindingStore:
             )
             connection.commit()
 
+    def latest_scan(self) -> dict[str, object] | None:
+        """Return the newest scan run, or None when the database has no scans."""
+        with self._connect() as connection:
+            row = connection.execute("SELECT * FROM scan_runs ORDER BY id DESC LIMIT 1").fetchone()
+            return None if row is None else dict(row)
+
+    def findings_for_scan(self, scan_id: int) -> list[Finding]:
+        """Reload the findings saved for one scan, in route order."""
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT id FROM findings WHERE scan_run_id = ? ORDER BY method, route, id",
+                (scan_id,),
+            ).fetchall()
+            finding_ids = [str(row["id"]) for row in rows]
+        return [self.load_finding(finding_id) for finding_id in finding_ids]
+
+    def load_verifications(self, finding_id: str) -> list[dict[str, object]]:
+        """Return fix attempts for one finding, oldest first."""
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT attempt, patch_diff, check_results, final_status, created_at,
+                       failure_reason, verdict, variant_results
+                FROM verifications
+                WHERE finding_id = ?
+                ORDER BY attempt, id
+                """,
+                (finding_id,),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
     def load_regression_tests(self) -> list[sqlite3.Row]:
         """Return saved regression tests in stable route order."""
         with self._connect() as connection:

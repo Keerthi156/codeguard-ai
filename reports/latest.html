@@ -1,0 +1,292 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>CodeGuard AI report</title>
+<style>
+
+body {
+  margin: 0;
+  background: #f4f5f7;
+  color: #1c1c1c;
+  font-family: "Segoe UI", sans-serif;
+  font-size: 16px;
+  line-height: 1.45;
+}
+main {
+  max-width: 60rem;
+  margin: 0 auto;
+  padding: 1.5rem 1.25rem 3rem;
+}
+h1, h2, h3 { line-height: 1.25; }
+h1 { margin: 0 0 0.25rem; font-size: 1.75rem; }
+h2 { margin: 0 0 0.75rem; font-size: 1.25rem; }
+h3 { margin: 1rem 0 0.35rem; font-size: 1rem; }
+header p, .summary { margin: 0.35rem 0 1rem; }
+.card {
+  background: #fff;
+  border: 1px solid #d0d4dc;
+  border-radius: 6px;
+  padding: 1rem 1.1rem;
+  margin: 0 0 1rem;
+}
+.badge {
+  display: inline-block;
+  margin-left: 0.4rem;
+  padding: 0.1rem 0.45rem;
+  border-radius: 4px;
+  font-size: 0.85rem;
+  vertical-align: middle;
+}
+.ok { background: #e5f6e8; color: #146c2e; }
+.bad { background: #fde8e8; color: #9b1c1c; }
+.wait { background: #fff4d6; color: #7a4e00; }
+.plain { background: #eceff3; color: #333; }
+.evidence { margin: 0.25rem 0 0; padding-left: 1.2rem; }
+.diff {
+  overflow-x: auto;
+  background: #fafafa;
+  border: 1px solid #e2e5eb;
+  padding: 0.5rem 0.7rem;
+  font-family: Consolas, "Courier New", monospace;
+  font-size: 0.85rem;
+  line-height: 1.35;
+  white-space: pre;
+}
+.diff .add { background: #e5f6e8; color: #146c2e; }
+.diff .del { background: #fde8e8; color: #9b1c1c; }
+table { width: 100%; border-collapse: collapse; margin-top: 0.35rem; }
+th, td {
+  border: 1px solid #d0d4dc;
+  padding: 0.35rem 0.5rem;
+  text-align: left;
+  vertical-align: top;
+  overflow-wrap: anywhere;
+}
+th { background: #f4f5f7; }
+.history, .bypass { margin: 0.75rem 0 0; }
+.shows { margin: -0.25rem 0 1rem; }
+footer { margin-top: 1.5rem; font-size: 0.95rem; }
+details { margin-top: 0.75rem; }
+summary { cursor: pointer; }
+pre {
+  overflow-x: auto;
+  background: #fafafa;
+  border: 1px solid #e2e5eb;
+  padding: 0.7rem 0.8rem;
+  font-family: Consolas, "Courier New", monospace;
+  font-size: 0.9rem;
+  white-space: pre-wrap;
+}
+@media print {
+  body { background: #fff; }
+  main { max-width: none; padding: 0; }
+  .card, footer { break-inside: avoid; border-color: #bbb; }
+  details > * { display: block !important; }
+}
+
+</style>
+</head>
+<body>
+<main>
+<header>
+<h1>CodeGuard AI</h1>
+<p>Scan time 2026-10-29T20:15:09.471036+00:00. Target codeguard.vulnerable.yaml. Revision 8e896f27ac686de5e3a2846cac3018dbc78a3442.</p>
+</header>
+<p class="summary">2 routes scanned, 2 confirmed, 2 verified and hardened, 2 regression tests saved</p>
+<p class="shows">What this shows: A non-owner could open another user&#x27;s record. The saved fix blocks that access, and the owner can still open their own.</p>
+<section class="card">
+<h2>GET /documents/{id} <span class="badge ok">Verified and Hardened</span></h2>
+<h3>Root cause</h3>
+<p>Missing object-level authorization: get_document returned any document by ID after only authentication via require_user, without verifying doc.owner == authenticated user, allowing IDOR across alice/bob resources.</p>
+<h3>Evidence</h3>
+<ul class="evidence">
+<li>EXPLOIT (non-owner bob): GET /documents/101 as bob -&gt; 200, body shows owner alice</li>
+<li>EXPLOIT (non-owner alice): GET /documents/202 as alice -&gt; 200, body shows owner bob</li>
+<li>CONTROL (owner alice): GET /documents/101 as alice -&gt; 200 (owner access works)</li>
+<li>CONTROL (owner bob): GET /documents/202 as bob -&gt; 200 (owner access works)</li>
+<li>DENIED (unauthenticated): GET /documents/101 as unauthenticated -&gt; 401 (access denied)</li></ul>
+<h3>Patch diff</h3>
+<div class="diff">
+<div>--- a/app.py</div>
+<div>+++ b/app.py</div>
+<div>@@ -73,8 +73,10 @@</div>
+<div> </div>
+<div> @app.get(&quot;/documents/{id}&quot;)</div>
+<div> def get_document(id: int, _user: Annotated[str, Depends(require_user)]) -&gt; Document:</div>
+<div class="del">-    &quot;&quot;&quot;Return the document when the token is valid. Ownership is not checked.&quot;&quot;&quot;</div>
+<div class="del">-    return _existing_document(id)</div>
+<div class="add">+    doc = _existing_document(id)</div>
+<div class="add">+    if doc.owner != _user:</div>
+<div class="add">+        raise HTTPException(status_code=403, detail=&quot;Forbidden&quot;)</div>
+<div class="add">+    return doc</div>
+<div> </div>
+<div> </div>
+<div> @app.put(&quot;/documents/{id}&quot;)</div></div>
+<h3>Before and after</h3>
+<table>
+<thead><tr><th>check</th><th>Before</th><th>After</th></tr></thead>
+<tbody>
+<tr><td>exploit</td><td>3 tests, 2 allowed (BAD)</td><td>0 allowed (OK)</td></tr>
+<tr><td>owner control</td><td>4 tests, all allowed (OK)</td><td>all allowed (OK)</td></tr>
+<tr><td>regression</td><td>10 tests, 4 non-owner allowed</td><td>0 non-owner allowed</td></tr>
+</tbody>
+</table>
+<details>
+<summary>Full request details</summary>
+<pre>exploit before
+  GET /documents/202 as alice: 200 allowed
+  GET /documents/101 as bob: 200 allowed
+  GET /documents/101 as unauthenticated: 401 denied
+exploit after
+  GET /documents/202 as alice: 403 denied
+  GET /documents/101 as bob: 403 denied
+  GET /documents/101 as unauthenticated: 401 denied
+owner control before
+  GET /documents/101 as alice: 200 allowed
+  GET /documents/202 as bob: 200 allowed
+  PUT /documents/101 as alice: 200 allowed
+  PUT /documents/202 as bob: 200 allowed
+owner control after
+  GET /documents/101 as alice: 200 allowed
+  GET /documents/202 as bob: 200 allowed
+  PUT /documents/101 as alice: 200 allowed
+  PUT /documents/202 as bob: 200 allowed
+regression before
+  GET /documents/101 as alice: 200 allowed
+  GET /documents/202 as alice: 200 allowed
+  GET /documents/101 as bob: 200 allowed
+  GET /documents/202 as bob: 200 allowed
+  PUT /documents/101 as alice: 200 allowed
+  PUT /documents/202 as alice: 200 allowed
+  PUT /documents/101 as bob: 200 allowed
+  PUT /documents/202 as bob: 200 allowed
+  GET /documents/101 as unauthenticated: 401 denied
+  PUT /documents/101 as unauthenticated: 401 denied
+regression after
+  GET /documents/101 as alice: 200 allowed
+  GET /documents/202 as alice: 403 denied
+  GET /documents/101 as bob: 403 denied
+  GET /documents/202 as bob: 200 allowed
+  PUT /documents/101 as alice: 200 allowed
+  PUT /documents/202 as alice: 403 denied
+  PUT /documents/101 as bob: 403 denied
+  PUT /documents/202 as bob: 200 allowed
+  GET /documents/101 as unauthenticated: 401 denied
+  PUT /documents/101 as unauthenticated: 401 denied</pre>
+</details>
+
+<p class="history">Attempt 1: VERIFIED and HARDENED</p>
+<p class="bypass">Bypass check: 14 variants, 0 bypasses (HARDENED)</p>
+<p>Regression test get_documents_id_read.py</p>
+</section><section class="card">
+<h2>PUT /documents/{id} <span class="badge ok">Verified and Hardened</span></h2>
+<h3>Root cause</h3>
+<p>Handler only verified authentication via require_user but never checked resource ownership against DOCUMENTS[id].owner, allowing any authenticated user (non_owner) to overwrite another user&#x27;s document in violation of write: non_owner=deny.</p>
+<h3>Evidence</h3>
+<ul class="evidence">
+<li>EXPLOIT (non-owner bob): PUT /documents/101 as bob -&gt; 200, body shows owner alice</li>
+<li>EXPLOIT (non-owner alice): PUT /documents/202 as alice -&gt; 200, body shows owner bob</li>
+<li>CONTROL (owner alice): PUT /documents/101 as alice -&gt; 200 (owner access works)</li>
+<li>CONTROL (owner bob): PUT /documents/202 as bob -&gt; 200 (owner access works)</li>
+<li>DENIED (unauthenticated): PUT /documents/101 as unauthenticated -&gt; 401 (access denied)</li></ul>
+<h3>Patch diff</h3>
+<div class="diff">
+<div>--- a/app.py</div>
+<div>+++ b/app.py</div>
+<div>@@ -85,6 +85,8 @@</div>
+<div> ) -&gt; Document:</div>
+<div>     &quot;&quot;&quot;Replace title and content when the token is valid. Ownership is not checked.&quot;&quot;&quot;</div>
+<div>     document = _existing_document(id)</div>
+<div class="add">+    if document.owner != _user:</div>
+<div class="add">+        raise HTTPException(status_code=403, detail=&quot;Forbidden&quot;)</div>
+<div>     updated = document.model_copy(update={&quot;title&quot;: body.title, &quot;content&quot;: body.content})</div>
+<div>     DOCUMENTS[id] = updated</div>
+<div>     return updated</div></div>
+<h3>Before and after</h3>
+<table>
+<thead><tr><th>check</th><th>Before</th><th>After</th></tr></thead>
+<tbody>
+<tr><td>exploit</td><td>3 tests, 2 allowed (BAD)</td><td>0 allowed (OK)</td></tr>
+<tr><td>owner control</td><td>4 tests, all allowed (OK)</td><td>all allowed (OK)</td></tr>
+<tr><td>regression</td><td>10 tests, 4 non-owner allowed</td><td>0 non-owner allowed</td></tr>
+</tbody>
+</table>
+<details>
+<summary>Full request details</summary>
+<pre>exploit before
+  PUT /documents/202 as alice: 200 allowed
+  PUT /documents/101 as bob: 200 allowed
+  PUT /documents/101 as unauthenticated: 401 denied
+exploit after
+  PUT /documents/202 as alice: 403 denied
+  PUT /documents/101 as bob: 403 denied
+  PUT /documents/101 as unauthenticated: 401 denied
+owner control before
+  GET /documents/101 as alice: 200 allowed
+  GET /documents/202 as bob: 200 allowed
+  PUT /documents/101 as alice: 200 allowed
+  PUT /documents/202 as bob: 200 allowed
+owner control after
+  GET /documents/101 as alice: 200 allowed
+  GET /documents/202 as bob: 200 allowed
+  PUT /documents/101 as alice: 200 allowed
+  PUT /documents/202 as bob: 200 allowed
+regression before
+  GET /documents/101 as alice: 200 allowed
+  GET /documents/202 as alice: 200 allowed
+  GET /documents/101 as bob: 200 allowed
+  GET /documents/202 as bob: 200 allowed
+  PUT /documents/101 as alice: 200 allowed
+  PUT /documents/202 as alice: 200 allowed
+  PUT /documents/101 as bob: 200 allowed
+  PUT /documents/202 as bob: 200 allowed
+  GET /documents/101 as unauthenticated: 401 denied
+  PUT /documents/101 as unauthenticated: 401 denied
+regression after
+  GET /documents/101 as alice: 200 allowed
+  GET /documents/202 as alice: 403 denied
+  GET /documents/101 as bob: 403 denied
+  GET /documents/202 as bob: 200 allowed
+  PUT /documents/101 as alice: 200 allowed
+  PUT /documents/202 as alice: 403 denied
+  PUT /documents/101 as bob: 403 denied
+  PUT /documents/202 as bob: 200 allowed
+  GET /documents/101 as unauthenticated: 401 denied
+  PUT /documents/101 as unauthenticated: 401 denied</pre>
+</details>
+
+<p class="history">Attempt 1: VERIFIED and HARDENED</p>
+<p class="bypass">Bypass check: 14 variants, 0 bypasses (HARDENED)</p>
+<p>Regression test put_documents_id_write.py</p>
+</section>
+<section class="card">
+<h2>Model run</h2>
+<table>
+<tbody>
+<tr><th>Provider</th><td>llm</td></tr>
+<tr><th>Model</th><td>meta-models/muse-spark-open-1026</td></tr>
+<tr><th>Tool mode</th><td>function</td></tr>
+<tr><th>Tools called</th><td>list_routes, get_matrix, read_handler, read_handler, submit_plan</td></tr>
+<tr><th>Calls</th><td>3</td></tr>
+<tr><th>Tokens</th><td>6554</td></tr>
+<tr><th>Latency</th><td>7253 ms</td></tr>
+</tbody>
+</table>
+</section>
+<section class="card">
+<h2>How to reproduce</h2>
+<pre>python -m app.cli scan --config fixtures/codeguard.vulnerable.yaml
+python -m app.cli fix --config fixtures/codeguard.vulnerable.yaml
+python -m app.cli regress --config fixtures/codeguard.vulnerable.yaml</pre>
+</section>
+<section class="card">
+<h2>Limits</h2>
+<p>Single localhost fixture. Static heuristics. Results vary by run.</p>
+</section>
+<footer>
+<p>Built during the Meta Global AI Developer Hackathon (Oct 27 to Nov 4, 2026). Fixtures are intentionally vulnerable and for local use only.</p>
+</footer>
+</main>
+</body>
+</html>
