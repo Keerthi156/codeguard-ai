@@ -12,6 +12,7 @@ import pytest
 from app.cli import main
 from app.findings.classifier import evidence_line
 from app.findings.store import FindingStore
+from tests.conftest import SERVERS, use_server
 
 ROOT = Path(__file__).resolve().parents[1]
 _TOKENS = ("alice-token", "bob-token")
@@ -37,7 +38,15 @@ def test_module_entrypoint_requires_a_command() -> None:
         assert token not in completed.stderr
 
 
-def test_vulnerable_scan_reports_confirmed_findings(mock_ai: None, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+@pytest.mark.parametrize("server", SERVERS)
+def test_vulnerable_scan_reports_confirmed_findings(
+    server: str,
+    mock_ai: None,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    use_server(server, monkeypatch)
     database = tmp_path / "codeguard.db"
 
     code = main(
@@ -92,7 +101,15 @@ def test_vulnerable_scan_reports_confirmed_findings(mock_ai: None, tmp_path: Pat
         assert token.encode() not in stored
 
 
-def test_secure_scan_reports_no_confirmed_findings(mock_ai: None, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+@pytest.mark.parametrize("server", SERVERS)
+def test_secure_scan_reports_no_confirmed_findings(
+    server: str,
+    mock_ai: None,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    use_server(server, monkeypatch)
     database = tmp_path / "codeguard.db"
 
     code = main(
