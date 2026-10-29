@@ -5,10 +5,11 @@ from __future__ import annotations
 from pathlib import Path
 
 from app.ai.mock_provider import MockProvider
+from app.ai.required_plan import supplement_plan
 from app.ai.validator import MAX_PLAN_CASES, validate_plan
 from app.analyzer.auth_checks import assess_routes
 from app.analyzer.routes import discover_routes
-from app.schemas import TestPlan
+from app.schemas import TestCase, TestPlan
 from app.target_config import load_target_config
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -74,6 +75,54 @@ def test_expectation_that_contradicts_the_matrix_is_rejected() -> None:
     assert result.accepted == []
     assert len(result.rejected) == 1
     assert "contradicts the matrix" in result.rejected[0].reasons[0]
+
+
+def test_unauthenticated_is_accepted_only_when_the_matrix_defines_it() -> None:
+    config, routes, _findings = _context()
+    case = TestCase(
+        id="get-101-unauthenticated",
+        route="/documents/{id}",
+        method="GET",
+        identity="unauthenticated",
+        resource_id="101",
+        expected="deny",
+        reason="an unauthenticated caller is denied",
+    )
+
+    accepted = validate_plan(TestPlan(cases=[case]), routes, config.matrix(), config)
+    assert accepted.rejected == []
+    assert accepted.accepted[0].identity == "unauthenticated"
+
+    matrix = config.matrix().model_copy(
+        update={
+            "read": config.matrix().read.model_copy(update={"unauthenticated": None}),
+            "write": config.matrix().write.model_copy(update={"unauthenticated": None}),
+        }
+    )
+    rejected = validate_plan(TestPlan(cases=[case]), routes, matrix, config)
+    assert rejected.accepted == []
+    assert "unauthenticated" in rejected.rejected[0].reasons[0]
+    assert "not defined" in rejected.rejected[0].reasons[0]
+
+
+def test_required_set_is_added_without_replacing_model_cases() -> None:
+    config, routes, findings = _context()
+    plan = MockProvider().plan_tests(findings, config.matrix())
+    validated = validate_plan(plan, routes, config.matrix(), config)
+
+    cases, model_tests, required_tests = supplement_plan(
+        validated.accepted,
+        findings,
+        config.matrix(),
+        config,
+    )
+
+    assert model_tests == len(plan.cases)
+    assert required_tests == 10
+    assert sum(case.source == "model" for case in cases) == model_tests
+    added = [case for case in cases if case.source == "required"]
+    assert [case.identity for case in added] == ["unauthenticated", "unauthenticated"]
+    assert {(case.method, case.resource_id) for case in added} == {("GET", "101"), ("PUT", "101")}
 
 
 def test_plan_over_the_limit_is_rejected() -> None:

@@ -15,14 +15,14 @@ from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.schemas import AuthorizationMatrix, HttpMethod, TestCase, TestPlan
+from app.schemas import AccessRule, AuthorizationMatrix, HttpMethod, TestCase, TestPlan
 from app.target_config import TargetConfig
 
 MAX_PLAN_CASES = 32
 _FORBIDDEN_FIELDS = frozenset({"command", "code", "shell", "url"})
 _CASE_FIELDS = frozenset({"id", "route", "method", "identity", "resource_id", "expected", "reason"})
 _METHODS = frozenset({"GET", "POST", "PUT", "PATCH", "DELETE"})
-_UNAUTHENTICATED = frozenset({"unauthenticated", "anonymous"})
+_UNAUTHENTICATED = "unauthenticated"
 _URL = re.compile(r"(?:https?:)?//[^\s\"'<>]+", re.IGNORECASE)
 _READ_METHODS = frozenset({"GET", "HEAD"})
 
@@ -144,7 +144,10 @@ def _validate_case(
         for resource_id_, resource in known_resources.items()
         if resource_id_ in {resource.id for resource in config.resources}
     }
-    if identity is not None and identity not in known_users and identity not in _UNAUTHENTICATED:
+    unauthenticated_rule = _unauthenticated_rule(method, path, matrix, config)
+    if identity == _UNAUTHENTICATED and unauthenticated_rule is None:
+        _add(reasons, "identity 'unauthenticated' is not defined by the matrix")
+    elif identity is not None and identity not in known_users and identity != _UNAUTHENTICATED:
         _add(reasons, f"unknown identity {identity!r}")
     if resource_id is not None and resource_id not in known_resources:
         _add(reasons, f"unknown resource {resource_id!r}")
@@ -153,7 +156,7 @@ def _validate_case(
         and identity is not None
         and resource_id is not None
         and resource_id in known_resources
-        and (identity in known_users or identity in _UNAUTHENTICATED)
+        and (identity in known_users or (identity == _UNAUTHENTICATED and unauthenticated_rule is not None))
         and expected is not None
     ):
         _add(reasons, _expectation_reason(method, path, identity, known_resources[resource_id].owner, expected, matrix, config))
@@ -195,7 +198,9 @@ def _expectation_reason(
 ) -> str:
     operation = _operation(method, path, config)
     rules = matrix.read if operation == "read" else matrix.write
-    if identity in _UNAUTHENTICATED:
+    if identity == _UNAUTHENTICATED:
+        if rules.unauthenticated is None:
+            return "identity 'unauthenticated' is not defined by the matrix"
         condition = "unauthenticated"
         required = rules.unauthenticated.expected
     elif identity == owner:
@@ -210,6 +215,18 @@ def _expectation_reason(
         f"expected {expected!r} contradicts the matrix "
         f"({condition} {operation} must be {required})"
     )
+
+
+def _unauthenticated_rule(
+    method: str | None,
+    path: str | None,
+    matrix: AuthorizationMatrix,
+    config: TargetConfig,
+) -> AccessRule | None:
+    if method is None:
+        return None
+    rules = matrix.read if _operation(method, path, config) == "read" else matrix.write
+    return rules.unauthenticated
 
 
 def _operation(method: str, path: str | None, config: TargetConfig) -> str:

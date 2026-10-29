@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic.json_schema import SkipJsonSchema
 
 Decision = Literal["allow", "deny"]
 HttpMethod = Literal["GET", "POST", "PUT", "PATCH", "DELETE"]
@@ -42,7 +43,7 @@ class OperationRules(BaseModel):
 
     owner: AccessRule
     non_owner: AccessRule
-    unauthenticated: AccessRule
+    unauthenticated: AccessRule | None = None
 
 
 class AuthorizationMatrix(BaseModel):
@@ -99,6 +100,7 @@ class TestCase(BaseModel):
     resource_id: str = Field(min_length=1)
     expected: Decision
     reason: str = Field(min_length=1)
+    source: SkipJsonSchema[Literal["model", "required"]] = Field(default="model", exclude=True)
 
 
 class TestPlan(BaseModel):

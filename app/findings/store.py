@@ -49,7 +49,17 @@ CREATE TABLE IF NOT EXISTS findings (
     source_lines TEXT NOT NULL,
     created_at TEXT NOT NULL,
     target_revision TEXT,
+    coverage_gaps TEXT NOT NULL DEFAULT '[]',
     FOREIGN KEY (scan_run_id) REFERENCES scan_runs(id)
+);
+
+CREATE TABLE IF NOT EXISTS verifications (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    finding_id TEXT NOT NULL,
+    patch_diff TEXT NOT NULL,
+    check_results TEXT NOT NULL,
+    final_status TEXT NOT NULL,
+    created_at TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS test_results (
@@ -80,6 +90,7 @@ class FindingStore:
             connection.executescript(_SCHEMA)
             _ensure_label_column(connection)
             _ensure_scan_columns(connection)
+            _ensure_finding_columns(connection)
             connection.commit()
 
     def save_finding(self, finding: Finding, results: Sequence[TestResult] = ()) -> int:
@@ -136,12 +147,42 @@ class FindingStore:
             connection.commit()
         return run_id
 
+    def save_verification(
+        self,
+        finding_id: str,
+        patch_diff: str,
+        check_results: str,
+        final_status: str,
+        created_at: datetime,
+    ) -> None:
+        """Store one fix-gate result. The diff and check text must already be redacted."""
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO verifications (
+                    finding_id, patch_diff, check_results, final_status, created_at
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                (finding_id, patch_diff, check_results, final_status, _iso(created_at)),
+            )
+            connection.commit()
+
+    def update_finding_status(self, finding_id: str, status: str, reason: str) -> None:
+        """Update the stored status after a fix is declined or checked."""
+        with self._connect() as connection:
+            connection.execute(
+                "UPDATE findings SET status = ?, reason = ? WHERE id = ?",
+                (status, reason, finding_id),
+            )
+            connection.commit()
+
     def load_finding(self, finding_id: str) -> Finding:
         """Reload one finding and its sanitized evidence."""
         with self._connect() as connection:
             row = connection.execute(
                 """
-                SELECT id, route, method, status, reason, source_lines, created_at, target_revision
+                SELECT id, route, method, status, reason, source_lines, created_at,
+                       target_revision, coverage_gaps
                 FROM findings
                 WHERE id = ?
                 """,
@@ -175,6 +216,7 @@ class FindingStore:
                 )
                 for item in evidence_rows
             ],
+            coverage_gaps=json.loads(row["coverage_gaps"] or "[]"),
             source_lines=json.loads(row["source_lines"]),
             created_at=datetime.fromisoformat(row["created_at"]),
             target_revision=row["target_revision"],
@@ -201,8 +243,8 @@ def _insert_finding(
         """
         INSERT INTO findings (
             id, scan_run_id, route, method, status, reason,
-            source_lines, created_at, target_revision
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            source_lines, created_at, target_revision, coverage_gaps
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             finding.id,
@@ -214,6 +256,7 @@ def _insert_finding(
             json.dumps(finding.source_lines),
             _iso(finding.created_at),
             finding.target_revision,
+            json.dumps(finding.coverage_gaps),
         ),
     )
     connection.executemany(
@@ -285,6 +328,12 @@ def _ensure_scan_columns(connection: sqlite3.Connection) -> None:
     for name, declaration in additions:
         if name not in existing:
             connection.execute(f"ALTER TABLE scan_runs ADD COLUMN {name} {declaration}")
+
+
+def _ensure_finding_columns(connection: sqlite3.Connection) -> None:
+    existing = {row[1] for row in connection.execute("PRAGMA table_info(findings)")}
+    if "coverage_gaps" not in existing:
+        connection.execute("ALTER TABLE findings ADD COLUMN coverage_gaps TEXT NOT NULL DEFAULT '[]'")
 
 
 def _ensure_label_column(connection: sqlite3.Connection) -> None:
