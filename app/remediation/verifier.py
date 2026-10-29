@@ -35,6 +35,7 @@ from app.findings.classifier import Finding, classify
 from app.findings.store import FindingStore
 from app.remediation.patcher import PatchProposal, PatchRejected, materialize, propose_patch, route_for
 from app.runner.executor import TestResult, execute_plan
+from app.runner.variants import VariantReport, build_variants, execute_variants, summarize
 from app.schemas import TestCase
 from app.target_config import TargetConfig, load_target_config
 
@@ -67,6 +68,7 @@ class _Tracked:
     final_reason: str = ""
     checks: list[_GateCheck] = field(default_factory=list)
     observed: dict[str, TestResult] = field(default_factory=dict)
+    variant_history: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -328,7 +330,15 @@ def _repair(
                 _remove_tree(path, source_dir)
         if not fresh:
             continue
-        after, regression_note, start_error = _run_patched(source_dir, tracked, config, tokens, cases)
+        after, regression_note, start_error, reports = _run_patched(
+            source_dir,
+            tracked,
+            config,
+            tokens,
+            cases,
+            fresh=fresh,
+            before=before,
+        )
         for item in fresh:
             checks, status, reason = _gate(
                 item.finding,
@@ -339,11 +349,16 @@ def _repair(
                 start_error,
                 regression_note,
             )
+            report = reports.get(item.finding.id)
+            status, reason, variant_feedback = _with_variants(status, reason, report)
             reason_text = _redact(reason, tokens)
             verdict = _verdict_name(status)
             item.labels.append(_attempt_label(item.attempts, verdict, reason_text))
             item.checks = list(checks)
             item.observed = after
+            if report is not None and _show_variant_line(status, report):
+                item.variant_history.append(report.line)
+            stored_variants = "[]" if report is None else _redact(report.to_json(), tokens)
             _record(
                 store,
                 item.finding,
@@ -355,9 +370,12 @@ def _repair(
                 attempt=item.attempts,
                 failure_reason="" if status == "Verified" else reason_text,
                 verdict=verdict,
+                variant_results=stored_variants,
             )
             if status == "Verification failed" and not canned and item.attempts < limit:
-                item.feedback = _gate_feedback(reason_text, checks)
+                item.feedback = (
+                    _redact(variant_feedback, tokens) if variant_feedback else _gate_feedback(reason_text, checks)
+                )
                 continue
             item.done = True
             item.final_status = status
@@ -377,21 +395,19 @@ def _repair(
                 )
             )
         elif item.checks and item.proposal is not None:
-            print(
-                _redact(
-                    _report(
-                        item.finding,
-                        item.final_status,
-                        item.final_reason,
-                        cases,
-                        before_by_id,
-                        item.observed,
-                        owners,
-                        details,
-                    ),
-                    tokens,
-                )
+            report_text = _report(
+                item.finding,
+                item.final_status,
+                item.final_reason,
+                cases,
+                before_by_id,
+                item.observed,
+                owners,
+                details,
             )
+            if item.variant_history:
+                report_text = report_text + "\n" + "\n".join(item.variant_history)
+            print(_redact(_wrap(report_text), tokens))
         elif item.final_status == "Verification failed":
             print(_redact(f"VERIFICATION FAILED: {item.final_reason}", tokens))
 
@@ -422,7 +438,10 @@ def _run_patched(
     config: TargetConfig,
     tokens: Sequence[str],
     cases: Sequence[TestCase],
-) -> tuple[dict[str, TestResult], str, str]:
+    *,
+    fresh: Sequence[_Tracked],
+    before: Sequence[TestResult],
+) -> tuple[dict[str, TestResult], str, str, dict[str, VariantReport]]:
     chosen = [
         (item.proposal.file, item.proposal.diff)
         for item in tracked
@@ -437,15 +456,72 @@ def _run_patched(
             raise FixUsageError(f"validation error: {exc}") from exc
         base_url, patched, start_error = _start_copy(copied, config, tokens)
         if start_error:
-            return {}, "", start_error
+            return {}, "", start_error, {}
         patched_config = config.model_copy(update={"base_url": base_url})
-        rerun = asyncio.run(execute_plan(cases, patched_config))
-        return {result.test_id: result for result in rerun}, _pytest_note(copied), ""
+        note = _pytest_note(copied)
+        after, reports = asyncio.run(
+            _recheck(fresh, cases, before, config, patched_config, note)
+        )
+        return after, note, "", reports
     finally:
         if patched is not None:
             patched.stop()
         if copied is not None:
             _remove_tree(copied, source_dir)
+
+
+async def _recheck(
+    fresh: Sequence[_Tracked],
+    cases: Sequence[TestCase],
+    before: Sequence[TestResult],
+    config: TargetConfig,
+    patched_config: TargetConfig,
+    regression_note: str,
+) -> tuple[dict[str, TestResult], dict[str, VariantReport]]:
+    """Re-run the plan, then the fixed variant set, while the patched app is up."""
+    rerun = await execute_plan(cases, patched_config)
+    after = {result.test_id: result for result in rerun}
+    reports: dict[str, VariantReport] = {}
+    for item in fresh:
+        checks, _status, _reason = _gate(item.finding, cases, before, after, config, "", regression_note)
+        if not _variants_ready(checks):
+            continue
+        built = build_variants(item.finding.method, item.finding.route, patched_config)
+        observed = await execute_variants(built, patched_config)
+        reports[item.finding.id] = summarize(observed)
+    return after, reports
+
+
+def _variants_ready(checks: Sequence[_GateCheck]) -> bool:
+    """The route's own exploit and owner checks passed, so the bypass set can run."""
+    by_name = {check.name: check for check in checks}
+    exploit = by_name.get("exploit")
+    owner = by_name.get("owner")
+    return (
+        exploit is not None
+        and owner is not None
+        and exploit.outcome == "pass"
+        and owner.outcome == "pass"
+    )
+
+
+def _with_variants(status: str, reason: str, report: VariantReport | None) -> tuple[str, str, str]:
+    """Apply the bypass stage. A bypass fails the gate. A 5xx does not start a repair."""
+    if report is None:
+        return status, reason, ""
+    if report.outcome == "bypass":
+        return "Verification failed", report.reason, report.model_feedback
+    if report.outcome == "inconclusive" and status == "Verified":
+        return "Inconclusive", report.reason, ""
+    return status, reason, ""
+
+
+def _show_variant_line(status: str, report: VariantReport) -> bool:
+    if report.outcome == "bypass":
+        return True
+    if report.outcome == "inconclusive":
+        return status == "Inconclusive"
+    return status == "Verified"
 
 
 def _attempt_label(number: int, verdict: str, reason: str) -> str:
@@ -606,6 +682,7 @@ def _record(
     attempt: int,
     failure_reason: str,
     verdict: str,
+    variant_results: str = "[]",
 ) -> None:
     created_at = datetime.now(timezone.utc)
     payload = [
@@ -633,6 +710,7 @@ def _record(
         attempt=attempt,
         failure_reason=_redact(failure_reason, tokens),
         verdict=verdict,
+        variant_results=variant_results,
     )
     store.update_finding_status(finding.id, status, _redact(reason, tokens))
 

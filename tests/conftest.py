@@ -67,6 +67,7 @@ def _serve_in_process(monkeypatch: pytest.MonkeyPatch) -> None:
     from app.cli import _import_root
     from app.remediation.verifier import FixUsageError
     from app.runner.executor import execute_plan
+    from app.runner.variants import execute_variants as run_variants
 
     state: dict[str, object] = {"app": None}
 
@@ -104,9 +105,18 @@ def _serve_in_process(monkeypatch: pytest.MonkeyPatch) -> None:
             kwargs["transport"] = httpx.ASGITransport(app=app)
         return await execute_plan(tests, config, **kwargs)  # type: ignore[arg-type]
 
+    async def execute_variants(variants: object, config: object, **kwargs: object) -> object:
+        if kwargs.get("transport") is None:
+            app = state["app"]
+            if app is None:
+                raise RuntimeError("in-process app was not started")
+            kwargs["transport"] = httpx.ASGITransport(app=app)
+        return await run_variants(variants, config, **kwargs)  # type: ignore[arg-type]
+
     monkeypatch.setattr("app.cli._start_target", start_cli)
     monkeypatch.setattr("app.cli.execute_plan", execute)
     monkeypatch.setattr("app.remediation.verifier._start", start_fix)
     monkeypatch.setattr("app.remediation.verifier.execute_plan", execute)
+    monkeypatch.setattr("app.remediation.verifier.execute_variants", execute_variants)
     monkeypatch.setattr("app.cli.time.sleep", lambda *_args, **_kwargs: None)
     monkeypatch.setattr("app.remediation.verifier.time.sleep", lambda *_args, **_kwargs: None)
