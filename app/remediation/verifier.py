@@ -69,6 +69,8 @@ class _Tracked:
     checks: list[_GateCheck] = field(default_factory=list)
     observed: dict[str, TestResult] = field(default_factory=dict)
     final_variant: VariantReport | None = None
+    display_verdict: str = ""
+    regression_name: str = ""
 
 
 @dataclass
@@ -204,11 +206,20 @@ def _run(
         f"{verified} verified, {failed} verification failed, {inconclusive} inconclusive, {declined} declined"
     )
     print(_redact(summary, tokens))
+    if failed or declined:
+        print(
+            _redact(
+                "Hint: a declined or failed route stays vulnerable until that route is approved and verified.",
+                tokens,
+            )
+        )
     if failed or inconclusive:
         return 1
     if declined:
         return 3
-    return 0
+    if all(_result_hardened(item) for item in tracked):
+        return 0
+    return 1
 
 
 def _track(confirmed: Sequence[Finding], route_findings: Sequence[object]) -> list[_Tracked]:
@@ -310,6 +321,10 @@ def _repair(
                 item.done = True
                 item.final_status = "Fix proposed"
                 item.final_reason = "The user declined the patch."
+                item.labels.append(
+                    f"Attempt {item.attempts}: Fix proposed: the user declined the patch"
+                )
+                item.display_verdict = "DECLINED: no patch applied, route still vulnerable"
                 _record(
                     store,
                     item.finding,
@@ -321,12 +336,6 @@ def _repair(
                     attempt=item.attempts,
                     failure_reason="",
                     verdict="declined",
-                )
-                print(
-                    _redact(
-                        f"{item.finding.method} {item.finding.route}: Fix proposed: the user declined the patch",
-                        tokens,
-                    )
                 )
         finally:
             for path in proposal_dirs:
@@ -353,9 +362,20 @@ def _repair(
                 regression_note,
             )
             report = reports.get(item.finding.id)
-            status, reason, variant_feedback = _with_variants(status, reason, report)
-            reason_text = _redact(reason, tokens)
-            verdict = _verdict_name(status)
+            sibling = _open_sibling(item, report, tracked)
+            if sibling is not None:
+                route = f"{sibling.finding.method} {sibling.finding.route}"
+                reason_text = (
+                    f"NOT HARDENED: sibling route {route} is still open (declined or unfixed)"
+                )
+                status = "Confirmed"
+                variant_feedback = ""
+                item.display_verdict = reason_text
+                verdict = "NOT HARDENED"
+            else:
+                status, reason, variant_feedback = _with_variants(status, reason, report)
+                reason_text = _redact(reason, tokens)
+                verdict = _verdict_name(status)
             item.labels.append(_history_label(item.attempts, status, reason_text, report))
             item.checks = list(checks)
             item.observed = after
@@ -374,7 +394,7 @@ def _repair(
                 verdict=verdict,
                 variant_results=stored_variants,
             )
-            if status == "Verification failed" and not canned and item.attempts < limit:
+            if sibling is None and status == "Verification failed" and not canned and item.attempts < limit:
                 item.feedback = (
                     _redact(variant_feedback, tokens) if variant_feedback else _gate_feedback(reason_text, checks)
                 )
@@ -383,34 +403,9 @@ def _repair(
             item.final_status = status
             item.final_reason = reason_text
             if status == "Verified":
-                _export_verified_test(item, config, store, tokens)
-    for item in tracked:
-        if item.labels:
-            print(_redact(" | ".join(item.labels), tokens))
-        if item.declined:
-            print(
-                _redact(
-                    _wrap(
-                        f"Finding: {item.finding.method} {item.finding.route}\nDECLINED: the user declined the patch"
-                    ),
-                    tokens,
-                )
-            )
-        elif item.checks and item.proposal is not None:
-            report_text = _report(
-                item.finding,
-                item.final_status,
-                item.final_reason,
-                cases,
-                before_by_id,
-                item.observed,
-                owners,
-                details,
-                verdict=_combined_verdict(item.final_status, item.final_reason, item.final_variant),
-            )
-            print(_redact(report_text, tokens))
-        elif item.final_status == "Verification failed":
-            print(_redact(f"VERIFICATION FAILED: {item.final_reason}", tokens))
+                item.regression_name = _export_verified_test(item, config, store, tokens)
+    for item in sorted(tracked, key=lambda current: (current.finding.route, current.finding.method)):
+        _print_section(item, cases, before_by_id, owners, details, tokens)
 
 
 def _export_verified_test(
@@ -418,9 +413,9 @@ def _export_verified_test(
     config: TargetConfig,
     store: FindingStore,
     tokens: Sequence[str],
-) -> None:
+) -> str:
     if item.proposal is None:
-        return
+        return ""
     from app.findings.regression import export_verified
 
     path = export_verified(
@@ -429,8 +424,91 @@ def _export_verified_test(
         root_cause=_redact(item.proposal.root_cause, tokens),
         db_path=store.path,
     )
-    if path is not None:
-        print(_redact(f"Regression test: {path.name}", tokens))
+    if path is None:
+        return ""
+    return path.name
+
+
+def _print_section(
+    item: _Tracked,
+    cases: Sequence[TestCase],
+    before_by_id: dict[str, TestResult],
+    owners: dict[str, str],
+    details: bool,
+    tokens: Sequence[str],
+) -> None:
+    """One result block: this finding's history, header, table, and final verdict."""
+    if item.labels:
+        print(_redact(" | ".join(item.labels), tokens))
+    header = f"Finding: {item.finding.method} {item.finding.route}"
+    if item.declined:
+        print(_redact(_wrap(f"{header}\n{item.display_verdict}"), tokens))
+    elif item.checks and item.proposal is not None:
+        verdict = item.display_verdict or _combined_verdict(
+            item.final_status,
+            item.final_reason,
+            item.final_variant,
+        )
+        print(
+            _redact(
+                _report(
+                    item.finding,
+                    item.final_status,
+                    item.final_reason,
+                    cases,
+                    before_by_id,
+                    item.observed,
+                    owners,
+                    details,
+                    verdict=verdict,
+                ),
+                tokens,
+            )
+        )
+    else:
+        verdict = item.display_verdict or _verdict(item.final_status, item.final_reason)
+        print(_redact(_wrap(f"{header}\n{verdict}"), tokens))
+    if item.regression_name:
+        print(_redact(f"Regression test: {item.regression_name}", tokens))
+
+
+def _open_sibling(
+    current: _Tracked,
+    report: VariantReport | None,
+    tracked: Sequence[_Tracked],
+) -> _Tracked | None:
+    """A bypass through another finding that was declined or never patched."""
+    if report is None or report.outcome != "bypass":
+        return None
+    hit = next((item for item in report.results if item.classification == "bypass"), None)
+    if hit is None:
+        return None
+    for other in tracked:
+        if other.finding.id == current.finding.id:
+            continue
+        if other.finding.method.upper() != hit.variant.method.upper():
+            continue
+        if not _route_matches(other.finding.route, hit.variant.path):
+            continue
+        if other.declined or other.proposal is None:
+            return other
+    return None
+
+
+def _route_matches(template: str, path: str) -> bool:
+    concrete = path.split("?", 1)[0]
+    if len(concrete) > 1 and concrete.endswith("/"):
+        concrete = concrete[:-1]
+    pattern = "[^/]+".join(re.escape(part) for part in re.split(r"\{[^}]+\}", template))
+    return re.fullmatch(pattern, concrete) is not None
+
+
+def _result_hardened(item: _Tracked) -> bool:
+    if item.final_status != "Verified":
+        return False
+    if item.final_variant is None:
+        return True
+    return item.final_variant.outcome == "hardened"
 
 
 def _run_patched(

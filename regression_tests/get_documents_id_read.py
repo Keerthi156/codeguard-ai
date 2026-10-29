@@ -3,8 +3,8 @@
 # Route: GET /documents/{id}
 # Operation: read
 # Date: 2026-10-29
-# Revision: 8e896f27ac686de5e3a2846cac3018dbc78a3442
-# Root cause: Missing object-level authorization: get_document returned any document by ID after only authentication via require_user, without verifying doc.owner == authenticated user, allowing IDOR across alice/bob resources.
+# Revision: d7f85ab829493a3e48daace28cd9f2a006c89596
+# Root cause: Missing object-level authorization: get_document returned any document by ID for any authenticated user without verifying ownership, allowing IDOR. The docstring explicitly noted ownership was not checked.
 # Policy assumption: read access is owner allow, non-owner deny, unauthenticated deny.
 # Tokens and the base URL come from the environment. This file has no keys.
 # Requests are refused unless the base URL is http://127.0.0.1 or http://localhost.

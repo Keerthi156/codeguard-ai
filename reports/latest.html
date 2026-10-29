@@ -91,14 +91,14 @@ pre {
 <main>
 <header>
 <h1>CodeGuard AI</h1>
-<p>Scan time 2026-10-29T20:15:09.471036+00:00. Target codeguard.vulnerable.yaml. Revision 8e896f27ac686de5e3a2846cac3018dbc78a3442.</p>
+<p>Scan time 2026-10-29T23:24:27.730496+00:00. Target codeguard.vulnerable.yaml. Revision d7f85ab829493a3e48daace28cd9f2a006c89596.</p>
 </header>
 <p class="summary">2 routes scanned, 2 confirmed, 2 verified and hardened, 2 regression tests saved</p>
 <p class="shows">What this shows: A non-owner could open another user&#x27;s record. The saved fix blocks that access, and the owner can still open their own.</p>
 <section class="card">
 <h2>GET /documents/{id} <span class="badge ok">Verified and Hardened</span></h2>
 <h3>Root cause</h3>
-<p>Missing object-level authorization: get_document returned any document by ID after only authentication via require_user, without verifying doc.owner == authenticated user, allowing IDOR across alice/bob resources.</p>
+<p>Missing object-level authorization: get_document returned any document by ID for any authenticated user without verifying ownership, allowing IDOR. The docstring explicitly noted ownership was not checked.</p>
 <h3>Evidence</h3>
 <ul class="evidence">
 <li>EXPLOIT (non-owner bob): GET /documents/101 as bob -&gt; 200, body shows owner alice</li>
@@ -110,15 +110,22 @@ pre {
 <div class="diff">
 <div>--- a/app.py</div>
 <div>+++ b/app.py</div>
-<div>@@ -73,8 +73,10 @@</div>
+<div>@@ -73,8 +73,17 @@</div>
 <div> </div>
 <div> @app.get(&quot;/documents/{id}&quot;)</div>
 <div> def get_document(id: int, _user: Annotated[str, Depends(require_user)]) -&gt; Document:</div>
 <div class="del">-    &quot;&quot;&quot;Return the document when the token is valid. Ownership is not checked.&quot;&quot;&quot;</div>
 <div class="del">-    return _existing_document(id)</div>
+<div class="add">+    &quot;&quot;&quot;Return the document only if the caller owns it.&quot;&quot;&quot;</div>
+<div class="add">+    from fastapi import HTTPException</div>
 <div class="add">+    doc = _existing_document(id)</div>
-<div class="add">+    if doc.owner != _user:</div>
-<div class="add">+        raise HTTPException(status_code=403, detail=&quot;Forbidden&quot;)</div>
+<div class="add">+    owner = getattr(doc, &quot;owner&quot;, None)</div>
+<div class="add">+    if owner is None:</div>
+<div class="add">+        owner = getattr(doc, &quot;owner_id&quot;, None)</div>
+<div class="add">+    if owner is None and isinstance(doc, dict):</div>
+<div class="add">+        owner = doc.get(&quot;owner&quot;) or doc.get(&quot;owner_id&quot;)</div>
+<div class="add">+    if owner != _user:</div>
+<div class="add">+        raise HTTPException(status_code=404, detail=&quot;Document not found&quot;)</div>
 <div class="add">+    return doc</div>
 <div> </div>
 <div> </div>
@@ -135,12 +142,12 @@ pre {
 <details>
 <summary>Full request details</summary>
 <pre>exploit before
-  GET /documents/202 as alice: 200 allowed
   GET /documents/101 as bob: 200 allowed
+  GET /documents/202 as alice: 200 allowed
   GET /documents/101 as unauthenticated: 401 denied
 exploit after
-  GET /documents/202 as alice: 403 denied
-  GET /documents/101 as bob: 403 denied
+  GET /documents/101 as bob: 404 denied
+  GET /documents/202 as alice: 404 denied
   GET /documents/101 as unauthenticated: 401 denied
 owner control before
   GET /documents/101 as alice: 200 allowed
@@ -154,24 +161,24 @@ owner control after
   PUT /documents/202 as bob: 200 allowed
 regression before
   GET /documents/101 as alice: 200 allowed
-  GET /documents/202 as alice: 200 allowed
   GET /documents/101 as bob: 200 allowed
   GET /documents/202 as bob: 200 allowed
+  GET /documents/202 as alice: 200 allowed
   PUT /documents/101 as alice: 200 allowed
-  PUT /documents/202 as alice: 200 allowed
   PUT /documents/101 as bob: 200 allowed
   PUT /documents/202 as bob: 200 allowed
+  PUT /documents/202 as alice: 200 allowed
   GET /documents/101 as unauthenticated: 401 denied
   PUT /documents/101 as unauthenticated: 401 denied
 regression after
   GET /documents/101 as alice: 200 allowed
-  GET /documents/202 as alice: 403 denied
-  GET /documents/101 as bob: 403 denied
+  GET /documents/101 as bob: 404 denied
   GET /documents/202 as bob: 200 allowed
+  GET /documents/202 as alice: 404 denied
   PUT /documents/101 as alice: 200 allowed
-  PUT /documents/202 as alice: 403 denied
   PUT /documents/101 as bob: 403 denied
   PUT /documents/202 as bob: 200 allowed
+  PUT /documents/202 as alice: 403 denied
   GET /documents/101 as unauthenticated: 401 denied
   PUT /documents/101 as unauthenticated: 401 denied</pre>
 </details>
@@ -182,7 +189,7 @@ regression after
 </section><section class="card">
 <h2>PUT /documents/{id} <span class="badge ok">Verified and Hardened</span></h2>
 <h3>Root cause</h3>
-<p>Handler only verified authentication via require_user but never checked resource ownership against DOCUMENTS[id].owner, allowing any authenticated user (non_owner) to overwrite another user&#x27;s document in violation of write: non_owner=deny.</p>
+<p>Handler authenticated via require_user but performed no authorization: it fetched the document and immediately applied the update without verifying document.owner == authenticated user, allowing any valid user to overwrite any document (IDOR). This violates write matrix non_owner: deny.</p>
 <h3>Evidence</h3>
 <ul class="evidence">
 <li>EXPLOIT (non-owner bob): PUT /documents/101 as bob -&gt; 200, body shows owner alice</li>
@@ -215,12 +222,12 @@ regression after
 <details>
 <summary>Full request details</summary>
 <pre>exploit before
-  PUT /documents/202 as alice: 200 allowed
   PUT /documents/101 as bob: 200 allowed
+  PUT /documents/202 as alice: 200 allowed
   PUT /documents/101 as unauthenticated: 401 denied
 exploit after
-  PUT /documents/202 as alice: 403 denied
   PUT /documents/101 as bob: 403 denied
+  PUT /documents/202 as alice: 403 denied
   PUT /documents/101 as unauthenticated: 401 denied
 owner control before
   GET /documents/101 as alice: 200 allowed
@@ -234,24 +241,24 @@ owner control after
   PUT /documents/202 as bob: 200 allowed
 regression before
   GET /documents/101 as alice: 200 allowed
-  GET /documents/202 as alice: 200 allowed
   GET /documents/101 as bob: 200 allowed
   GET /documents/202 as bob: 200 allowed
+  GET /documents/202 as alice: 200 allowed
   PUT /documents/101 as alice: 200 allowed
-  PUT /documents/202 as alice: 200 allowed
   PUT /documents/101 as bob: 200 allowed
   PUT /documents/202 as bob: 200 allowed
+  PUT /documents/202 as alice: 200 allowed
   GET /documents/101 as unauthenticated: 401 denied
   PUT /documents/101 as unauthenticated: 401 denied
 regression after
   GET /documents/101 as alice: 200 allowed
-  GET /documents/202 as alice: 403 denied
-  GET /documents/101 as bob: 403 denied
+  GET /documents/101 as bob: 404 denied
   GET /documents/202 as bob: 200 allowed
+  GET /documents/202 as alice: 404 denied
   PUT /documents/101 as alice: 200 allowed
-  PUT /documents/202 as alice: 403 denied
   PUT /documents/101 as bob: 403 denied
   PUT /documents/202 as bob: 200 allowed
+  PUT /documents/202 as alice: 403 denied
   GET /documents/101 as unauthenticated: 401 denied
   PUT /documents/101 as unauthenticated: 401 denied</pre>
 </details>
@@ -269,8 +276,8 @@ regression after
 <tr><th>Tool mode</th><td>function</td></tr>
 <tr><th>Tools called</th><td>list_routes, get_matrix, read_handler, read_handler, submit_plan</td></tr>
 <tr><th>Calls</th><td>3</td></tr>
-<tr><th>Tokens</th><td>6554</td></tr>
-<tr><th>Latency</th><td>7253 ms</td></tr>
+<tr><th>Tokens</th><td>6030</td></tr>
+<tr><th>Latency</th><td>7041 ms</td></tr>
 </tbody>
 </table>
 </section>
