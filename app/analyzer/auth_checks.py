@@ -1,8 +1,10 @@
 """Static authorization heuristics for routes discovered from source.
 
 Each handler is parsed with ast. Same-file functions it calls are parsed too,
-because an ownership comparison often lives in a helper. Target code is never
-imported or executed. These checks are indicators, not proof.
+because an ownership comparison often lives in a helper. One level of FastAPI
+``Depends`` callables is parsed the same way, including a function imported
+from another file under the scanned directory. Target code is never imported
+or executed. These checks are indicators, not proof.
 """
 
 from __future__ import annotations
@@ -52,7 +54,7 @@ class RouteFinding(BaseModel):
 def assess_routes(directory: str | Path) -> list[RouteFinding]:
     """Apply authorization heuristics to every route under ``directory``."""
     root = Path(directory)
-    parsed: dict[str, dict[str, _Function]] = {}
+    parsed: dict[str, _Module] = {}
     return [_assess_route(root, route, parsed) for route in discover_routes(root)]
 
 
@@ -63,27 +65,40 @@ class _Signals:
     ownership: bool = False
     role: bool = False
     lines: set[int] = field(default_factory=set)
+    notes: list[tuple[str, str]] = field(default_factory=list)
+    unresolved: list[str] = field(default_factory=list)
+
+
+@dataclass
+class _Module:
+    functions: dict[str, _Function]
+    imports: dict[str, tuple[str, str | None]]
 
 
 def _assess_route(
     root: Path,
     route: DiscoveredRoute,
-    parsed: dict[str, dict[str, _Function]],
+    parsed: dict[str, _Module],
 ) -> RouteFinding:
-    functions = _functions_for(root, route.file, parsed)
+    module = _module_for(root, route.file, parsed)
+    functions = {} if module is None else module.functions
     handler = _match_handler(functions, route)
     signals = _Signals()
     signals.lines.update((route.start_line, route.end_line))
     if handler is not None:
+        seen: set[tuple[str, tuple[str, ...], tuple[str, ...]]] = set()
         _scan_function(
             handler,
             set(route.path_parameters),
             set(),
             functions,
             signals,
-            set(),
+            seen,
             handler=True,
+            where="the handler",
+            record_lines=True,
         )
+        _follow_dependencies(root, route, handler, parsed, signals, seen)
     status, confidence, reason = _classify(signals)
     return RouteFinding(
         file=route.file,
@@ -98,23 +113,81 @@ def _assess_route(
     )
 
 
-def _functions_for(
-    root: Path,
-    relative: str,
-    parsed: dict[str, dict[str, _Function]],
-) -> dict[str, _Function]:
+def _module_for(root: Path, relative: str, parsed: dict[str, _Module]) -> _Module | None:
     cached = parsed.get(relative)
     if cached is not None:
         return cached
-    source = (root / relative).read_text(encoding="utf-8")
-    tree = ast.parse(source, filename=relative)
+    path = root / relative
+    try:
+        source = path.read_text(encoding="utf-8")
+        tree = ast.parse(source, filename=relative)
+    except (OSError, SyntaxError, UnicodeError):
+        empty = _Module({}, {})
+        parsed[relative] = empty
+        return empty
     functions = {
         statement.name: statement
         for statement in tree.body
         if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef))
     }
-    parsed[relative] = functions
-    return functions
+    module = _Module(functions, _import_map(tree, root, relative))
+    parsed[relative] = module
+    return module
+
+
+def _import_map(tree: ast.AST, root: Path, relative: str) -> dict[str, tuple[str, str | None]]:
+    """Map a local name to a file under ``root`` and, for ``from`` imports, the symbol."""
+    current = Path(relative)
+    found: dict[str, tuple[str, str | None]] = {}
+    for statement in tree.body if isinstance(tree, ast.Module) else []:
+        if isinstance(statement, ast.Import):
+            for alias in statement.names:
+                file_rel = _find_module(root, current, alias.name, 0)
+                if file_rel is None:
+                    continue
+                found[alias.asname or alias.name] = (file_rel, None)
+        elif isinstance(statement, ast.ImportFrom):
+            file_rel = _find_module(root, current, statement.module or "", statement.level)
+            if file_rel is None:
+                continue
+            for alias in statement.names:
+                if alias.name == "*":
+                    continue
+                found[alias.asname or alias.name] = (file_rel, alias.name)
+    return found
+
+
+def _find_module(root: Path, current: Path, module: str, level: int) -> str | None:
+    parts = [part for part in module.split(".") if part]
+    if level:
+        parent = current.parent
+        for _ in range(level - 1):
+            if parent == Path("."):
+                return None
+            parent = parent.parent
+        bases = [parent.joinpath(*parts)] if parts else [parent]
+    elif not parts:
+        return None
+    else:
+        bases = [current.parent.joinpath(*parts), Path(*parts)]
+    for base in bases:
+        for suffix in (".py", "/__init__.py"):
+            candidate = Path(str(base) + suffix)
+            located = _inside_root(root, candidate)
+            if located is not None:
+                return located
+    return None
+
+
+def _inside_root(root: Path, candidate: Path) -> str | None:
+    try:
+        resolved = (root / candidate).resolve()
+        root_resolved = root.resolve()
+    except OSError:
+        return None
+    if not resolved.is_file() or not resolved.is_relative_to(root_resolved):
+        return None
+    return resolved.relative_to(root_resolved).as_posix()
 
 
 def _match_handler(
@@ -139,6 +212,8 @@ def _scan_function(
     seen: set[tuple[str, tuple[str, ...], tuple[str, ...]]],
     *,
     handler: bool,
+    where: str,
+    record_lines: bool,
 ) -> None:
     key = (func.name, tuple(sorted(path_aliases)), tuple(sorted(auth_aliases)))
     if key in seen:
@@ -149,45 +224,212 @@ def _scan_function(
     if handler:
         names = set(_param_names(func))
         path_names &= names
-        _collect_signature_auth(func, auth_names, signals)
-    _Scanner(func, path_names, auth_names, functions, signals, seen).visit(func)
+        _collect_signature_auth(func, auth_names, signals, where, record_lines)
+    _Scanner(func, path_names, auth_names, functions, signals, seen, where, record_lines).visit(func)
+
+
+def _follow_dependencies(
+    root: Path,
+    route: DiscoveredRoute,
+    handler: _Function,
+    parsed: dict[str, _Module],
+    signals: _Signals,
+    seen: set[tuple[str, tuple[str, ...], tuple[str, ...]]],
+) -> None:
+    """Parse one level of Depends/Security callables. Nested dependencies are not entered."""
+    for ref in _dependency_refs(handler):
+        if not ref:
+            _remember(signals.unresolved, "Depends")
+            continue
+        resolved = _resolve_dependency(root, route.file, ref, parsed)
+        if resolved is None:
+            _remember(signals.unresolved, ref)
+            continue
+        func, functions = resolved
+        _scan_function(
+            func,
+            set(route.path_parameters),
+            set(),
+            functions,
+            signals,
+            seen,
+            handler=True,
+            where=f"dependency {func.name}",
+            record_lines=False,
+        )
+
+
+def _resolve_dependency(
+    root: Path,
+    relative: str,
+    name: str,
+    parsed: dict[str, _Module],
+) -> tuple[_Function, dict[str, _Function]] | None:
+    module = _module_for(root, relative, parsed)
+    if module is None:
+        return None
+    if "." not in name:
+        local = module.functions.get(name)
+        if local is not None:
+            return local, module.functions
+        imported = module.imports.get(name)
+        if imported is None:
+            return None
+        return _imported_function(root, imported, name, parsed)
+    parts = name.split(".")
+    for cut in range(len(parts) - 1, 0, -1):
+        imported = module.imports.get(".".join(parts[:cut]))
+        if imported is None:
+            continue
+        file_rel, symbol = imported
+        if symbol is not None:
+            continue
+        other = _module_for(root, file_rel, parsed)
+        if other is None or len(parts[cut:]) != 1:
+            return None
+        func = other.functions.get(parts[cut])
+        if func is None:
+            return None
+        return func, other.functions
+    return None
+
+
+def _imported_function(
+    root: Path,
+    imported: tuple[str, str | None],
+    fallback: str,
+    parsed: dict[str, _Module],
+) -> tuple[_Function, dict[str, _Function]] | None:
+    file_rel, symbol = imported
+    other = _module_for(root, file_rel, parsed)
+    if other is None:
+        return None
+    func = other.functions.get(symbol or fallback)
+    if func is None:
+        return None
+    return func, other.functions
+
+
+def _dependency_refs(func: _Function) -> list[str]:
+    refs: list[str] = []
+    defaults = _defaults_by_name(func)
+    for arg in _args(func):
+        for node in (arg.annotation, defaults.get(arg.arg)):
+            if node is None:
+                continue
+            for call in _dependency_calls(node):
+                _remember(refs, _dependency_ref(call))
+    return refs
+
+
+def _dependency_ref(call: ast.Call) -> str:
+    if not call.args:
+        return ""
+    return _dotted_name(call.args[0]) or ""
+
+
+def _remember(items: list[str], value: str) -> None:
+    if value not in items:
+        items.append(value)
 
 
 def _classify(signals: _Signals) -> tuple[_Status, _Confidence, str]:
+    scope = "in the handler or a same-file helper"
+    if any(where.startswith("dependency ") for _kind, where in signals.notes):
+        scope = "in the handler, a same-file helper, or a dependency"
+    dependency_auth = _from_dependency(signals, "auth")
+    dependency_lookup = _from_dependency(signals, "lookup")
     if signals.ownership and signals.role:
-        return (
-            "No issue observed",
-            "medium",
-            f"{_NOT_PROOF} An ownership comparison and a role check were observed "
-            "in the handler or a same-file helper.",
+        text = (
+            "An ownership comparison and a role check were observed "
+            f"{scope}."
         )
+        return "No issue observed", "medium", _finish(text, signals)
     if signals.ownership:
-        return (
-            "No issue observed",
-            "medium",
-            f"{_NOT_PROOF} An ownership comparison between a resource's owner field "
-            "and the current user was observed in the handler or a same-file helper.",
+        text = (
+            "An ownership comparison between a resource's owner field "
+            f"and the current user was observed {scope}."
         )
+        return "No issue observed", "medium", _finish(text, signals)
     if signals.role:
-        return (
-            "No issue observed",
-            "medium",
-            f"{_NOT_PROOF} A role check was observed in the handler or a same-file helper.",
-        )
-    if signals.auth and signals.lookup:
-        return (
-            "Suspected",
-            "medium",
-            f"{_NOT_PROOF} Authentication was observed and a path parameter is used "
+        text = f"A role check was observed {scope}."
+        return "No issue observed", "medium", _finish(text, signals)
+    if (signals.auth and signals.lookup) or dependency_auth or dependency_lookup:
+        text = (
+            "Authentication was observed and a path parameter is used "
             "to look up a resource, but no ownership comparison or role check was "
-            "observed in the handler or a same-file helper.",
+            f"observed {scope}."
         )
-    return (
-        "No issue observed",
-        "low",
-        f"{_NOT_PROOF} Authentication and a path parameter used to look up a resource "
-        "were not both observed.",
+        if dependency_auth and not signals.lookup:
+            text = (
+                "Authentication was observed in a dependency, but no ownership comparison "
+                f"or role check was observed {scope}."
+            )
+        elif dependency_lookup and not signals.auth:
+            text = (
+                "A path parameter is used to look up a resource in a dependency, but no "
+                f"ownership comparison or role check was observed {scope}."
+            )
+        return "Suspected", "medium", _finish(text, signals)
+    text = (
+        "Authentication and a path parameter used to look up a resource "
+        "were not both observed."
     )
+    return "No issue observed", "low", _finish(text, signals)
+
+
+def _from_dependency(signals: _Signals, kind: str) -> bool:
+    return any(note == kind and where.startswith("dependency ") for note, where in signals.notes)
+
+
+def _finish(body: str, signals: _Signals) -> str:
+    parts = [f"{_NOT_PROOF} {body.strip()}"]
+    contributed = _contribution_text(signals)
+    if contributed:
+        parts.append(contributed)
+    unresolved = _unresolved_text(signals)
+    if unresolved:
+        parts.append(unresolved)
+    return " ".join(parts)
+
+
+def _contribution_text(signals: _Signals) -> str:
+    labels = {
+        "auth": "authentication",
+        "lookup": "a resource lookup by a path parameter",
+        "ownership": "an ownership comparison",
+        "role": "a role check",
+    }
+    grouped: dict[str, list[str]] = {}
+    for kind, where in signals.notes:
+        if not where.startswith("dependency "):
+            continue
+        name = where.removeprefix("dependency ")
+        grouped.setdefault(name, [])
+        if kind not in grouped[name]:
+            grouped[name].append(kind)
+    sentences: list[str] = []
+    for name, kinds in grouped.items():
+        described = [labels[kind] for kind in ("auth", "lookup", "ownership", "role") if kind in kinds]
+        if described:
+            sentences.append(f"Dependency {name} contributed {_english_join(described)}.")
+    return " ".join(sentences)
+
+
+def _unresolved_text(signals: _Signals) -> str:
+    names = [name or "Depends" for name in signals.unresolved]
+    if not names:
+        return ""
+    label = "dependency" if len(names) == 1 else "dependencies"
+    return f"Unresolved {label} {_english_join(names)}."
+
+
+def _english_join(items: list[str]) -> str:
+    if len(items) == 1:
+        return items[0]
+    if len(items) == 2:
+        return f"{items[0]} and {items[1]}"
+    return ", ".join(items[:-1]) + ", and " + items[-1]
 
 
 class _Scanner(ast.NodeVisitor):
@@ -199,6 +441,8 @@ class _Scanner(ast.NodeVisitor):
         functions: dict[str, _Function],
         signals: _Signals,
         seen: set[tuple[str, tuple[str, ...], tuple[str, ...]]],
+        where: str,
+        record_lines: bool,
     ) -> None:
         self.function = function
         self.path_aliases = path_aliases
@@ -206,6 +450,8 @@ class _Scanner(ast.NodeVisitor):
         self.functions = functions
         self.signals = signals
         self.seen = seen
+        self.where = where
+        self.record_lines = record_lines
 
     def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
         if node is self.function:
@@ -230,11 +476,9 @@ class _Scanner(ast.NodeVisitor):
 
     def visit_Subscript(self, node: ast.Subscript) -> None:
         if _uses_name(node.slice, self.path_aliases):
-            self.signals.lookup = True
-            self.signals.lines.add(node.lineno)
+            _mark(self.signals, "lookup", self.where, node.lineno, self.record_lines)
         if _string_text(node.slice) == "authorization":
-            self.signals.auth = True
-            self.signals.lines.add(node.lineno)
+            _mark(self.signals, "auth", self.where, node.lineno, self.record_lines)
         self.generic_visit(node)
 
     def visit_Compare(self, node: ast.Compare) -> None:
@@ -242,20 +486,17 @@ class _Scanner(ast.NodeVisitor):
         owner = any(_is_owner_field(side) for side in sides)
         current_user = any(_is_current_user(side, self.auth_aliases) for side in sides)
         if owner and current_user:
-            self.signals.ownership = True
-            self.signals.lines.add(node.lineno)
+            _mark(self.signals, "ownership", self.where, node.lineno, self.record_lines)
         self.generic_visit(node)
 
     def visit_Attribute(self, node: ast.Attribute) -> None:
         if node.attr in _ROLE_ATTRS:
-            self.signals.role = True
-            self.signals.lines.add(node.lineno)
+            _mark(self.signals, "role", self.where, node.lineno, self.record_lines)
         self.generic_visit(node)
 
     def visit_Name(self, node: ast.Name) -> None:
         if isinstance(node.ctx, ast.Load) and node.id.lower() in {"token", "access_token", "bearer_token"}:
-            self.signals.auth = True
-            self.signals.lines.add(node.lineno)
+            _mark(self.signals, "auth", self.where, node.lineno, self.record_lines)
         self.generic_visit(node)
 
     def visit_Call(self, node: ast.Call) -> None:
@@ -271,25 +512,23 @@ class _Scanner(ast.NodeVisitor):
     def _note_call(self, node: ast.Call) -> None:
         for arg in (*node.args, *(keyword.value for keyword in node.keywords)):
             if _string_text(arg) == "authorization":
-                self.signals.auth = True
-                self.signals.lines.add(node.lineno)
+                _mark(self.signals, "auth", self.where, node.lineno, self.record_lines)
         func_name = _expr_name(node.func)
         if func_name and any(part in func_name.lower() for part in _ROLE_CALL_PARTS):
-            self.signals.role = True
-            self.signals.lines.add(node.lineno)
+            _mark(self.signals, "role", self.where, node.lineno, self.record_lines)
         if (
             isinstance(node.func, ast.Attribute)
             and node.func.attr in _LOOKUP_ATTRS
-            and _call_uses_path(node, self.path_aliases)
+            and             _call_uses_path(node, self.path_aliases)
         ):
-            self.signals.lookup = True
-            self.signals.lines.add(node.lineno)
+            _mark(self.signals, "lookup", self.where, node.lineno, self.record_lines)
         if isinstance(node.func, ast.Name):
             callee = self.functions.get(node.func.id)
             if callee is None:
                 return
             mapped_path, mapped_auth = _map_call(node, callee, self.path_aliases, self.auth_aliases)
             if mapped_path or mapped_auth:
+                where = self.where if self.where.startswith("dependency ") else f"helper {callee.name}"
                 _scan_function(
                     callee,
                     mapped_path,
@@ -298,10 +537,18 @@ class _Scanner(ast.NodeVisitor):
                     self.signals,
                     self.seen,
                     handler=False,
+                    where=where,
+                    record_lines=self.record_lines,
                 )
 
 
-def _collect_signature_auth(func: _Function, auth_names: set[str], signals: _Signals) -> None:
+def _collect_signature_auth(
+    func: _Function,
+    auth_names: set[str],
+    signals: _Signals,
+    where: str,
+    record_lines: bool,
+) -> None:
     defaults = _defaults_by_name(func)
     for arg in _args(func):
         for node in (arg.annotation, defaults.get(arg.arg)):
@@ -311,18 +558,30 @@ def _collect_signature_auth(func: _Function, auth_names: set[str], signals: _Sig
                 getter = _expr_name(call.args[0]) if call.args else None
                 if getter and any(part in getter.lower() for part in _USER_GETTER_PARTS):
                     auth_names.add(arg.arg)
-                    signals.auth = True
-                    signals.lines.add(call.lineno)
+                    _mark(signals, "auth", where, call.lineno, record_lines)
             if _mentions_header(node) and any(part in arg.arg.lower() for part in _CREDENTIAL_PARTS):
                 auth_names.add(arg.arg)
-                signals.auth = True
-                signals.lines.add(node.lineno)
+                _mark(signals, "auth", where, node.lineno, record_lines)
         if any(part in arg.arg.lower() for part in _CREDENTIAL_PARTS):
             auth_names.add(arg.arg)
-            signals.auth = True
             line = arg.lineno if isinstance(arg.lineno, int) else None
-            if line is not None:
-                signals.lines.add(line)
+            _mark(signals, "auth", where, line, record_lines)
+
+
+def _mark(signals: _Signals, kind: str, where: str, line: int | None, record_line: bool) -> None:
+    if kind == "auth":
+        signals.auth = True
+    elif kind == "lookup":
+        signals.lookup = True
+    elif kind == "ownership":
+        signals.ownership = True
+    elif kind == "role":
+        signals.role = True
+    if record_line and isinstance(line, int):
+        signals.lines.add(line)
+    note = (kind, where)
+    if note not in signals.notes:
+        signals.notes.append(note)
 
 
 def _dependency_calls(node: ast.expr) -> list[ast.Call]:
@@ -412,6 +671,16 @@ def _is_current_user(node: ast.expr, auth_names: set[str]) -> bool:
     if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
         return node.value.id in auth_names and node.attr in _USER_ID_ATTRS
     return False
+
+
+def _dotted_name(node: ast.AST) -> str | None:
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        base = _dotted_name(node.value)
+        if base:
+            return f"{base}.{node.attr}"
+    return None
 
 
 def _expr_name(node: ast.AST) -> str | None:
