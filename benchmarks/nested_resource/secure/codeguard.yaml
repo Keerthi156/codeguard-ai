@@ -1,0 +1,19 @@
+# Ownership-checked benchmark twin. Local testing only. Not for production.
+# Policy: only the owner of the parent invoice can read its items.
+base_url: http://127.0.0.1:8108
+target_app: benchmarks.nested_resource.secure.app:app
+source_dir: benchmarks/nested_resource/secure
+users:
+  - name: alice
+    token: alice-token
+  - name: bob
+    token: bob-token
+resources:
+  - id: inv-101
+    owner: alice
+  - id: inv-202
+    owner: bob
+routes:
+  - method: GET
+    path: /invoices/{invoice_id}/items
+    operation: read

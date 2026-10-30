@@ -8,6 +8,7 @@ validation.
     python -m app.cli fix --config fixtures/codeguard.vulnerable.yaml
     python -m app.cli regress --config fixtures/codeguard.vulnerable.yaml
     python -m app.cli report --config fixtures/codeguard.vulnerable.yaml
+    python -m app.cli benchmark --runs 3 --out reports/benchmark.md
 """
 
 from __future__ import annotations
@@ -110,6 +111,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             from app.report_html import run_report
 
             return run_report(args.config, db_path=args.db, out_path=args.out)
+        if args.command == "benchmark":
+            from app.benchmark_run import run_benchmark
+
+            return run_benchmark(runs=args.runs, out_path=args.out, labels_path=args.labels)
         return _scan(
             args.config,
             start_server=not args.no_start,
@@ -165,6 +170,17 @@ def _parser() -> argparse.ArgumentParser:
     report.add_argument("--config", required=True, help="path to a codeguard YAML file")
     report.add_argument("--db", default=str(DEFAULT_DB_PATH), help="SQLite database path")
     report.add_argument("--out", default="reports/latest.html", help="HTML file to write")
+    benchmark = subcommands.add_parser(
+        "benchmark",
+        help="measure scan results against the hand-written benchmark labels",
+    )
+    benchmark.add_argument("--runs", type=int, default=3, help="scans to run for each labeled app")
+    benchmark.add_argument("--out", default="reports/benchmark.md", help="markdown report path")
+    benchmark.add_argument(
+        "--labels",
+        default="benchmarks/labels.yaml",
+        help="hand-written label file",
+    )
     return parser
 
 

@@ -1,0 +1,81 @@
+# Local testing only. Hand-written ground truth for the benchmark apps.
+# These labels were written from the source of each app, not from a CodeGuard run.
+# Pairs used while building the tool: none.
+
+pairs_used_while_building: none
+
+apps:
+  - id: helper-check-vulnerable
+    pair: helper-check
+    config: benchmarks/helper_check/vulnerable/codeguard.yaml
+    routes:
+      - method: GET
+        path: /documents/{id}
+        vulnerable: true
+      - method: PUT
+        path: /documents/{id}
+        vulnerable: true
+  - id: helper-check-secure
+    pair: helper-check
+    config: benchmarks/helper_check/secure/codeguard.yaml
+    routes:
+      - method: GET
+        path: /documents/{id}
+        vulnerable: false
+      - method: PUT
+        path: /documents/{id}
+        vulnerable: false
+  - id: dependency-check-vulnerable
+    pair: dependency-check
+    config: benchmarks/dependency_check/vulnerable/codeguard.yaml
+    routes:
+      - method: GET
+        path: /documents/{id}
+        vulnerable: true
+      - method: PUT
+        path: /documents/{id}
+        vulnerable: true
+  - id: dependency-check-secure
+    pair: dependency-check
+    config: benchmarks/dependency_check/secure/codeguard.yaml
+    routes:
+      - method: GET
+        path: /documents/{id}
+        vulnerable: false
+      - method: PUT
+        path: /documents/{id}
+        vulnerable: false
+  - id: uuid-ids-vulnerable
+    pair: uuid-ids
+    config: benchmarks/uuid_ids/vulnerable/codeguard.yaml
+    routes:
+      - method: GET
+        path: /documents/{id}
+        vulnerable: true
+      - method: DELETE
+        path: /documents/{id}
+        vulnerable: true
+  - id: uuid-ids-secure
+    pair: uuid-ids
+    config: benchmarks/uuid_ids/secure/codeguard.yaml
+    routes:
+      - method: GET
+        path: /documents/{id}
+        vulnerable: false
+      - method: DELETE
+        path: /documents/{id}
+        vulnerable: false
+  - id: nested-resource-vulnerable
+    pair: nested-resource
+    config: benchmarks/nested_resource/vulnerable/codeguard.yaml
+    routes:
+      - method: GET
+        path: /invoices/{invoice_id}/items
+        vulnerable: true
+  - id: nested-resource-secure
+    pair: nested-resource
+    config: benchmarks/nested_resource/secure/codeguard.yaml
+    routes:
+      - method: GET
+        path: /invoices/{invoice_id}/items
+        vulnerable: false

@@ -1,0 +1,22 @@
+# Ownership-checked benchmark twin. Local testing only. Not for production.
+# Policy: only the owner can read or modify their document.
+base_url: http://127.0.0.1:8104
+target_app: benchmarks.dependency_check.secure.app:app
+source_dir: benchmarks/dependency_check/secure
+users:
+  - name: alice
+    token: alice-token
+  - name: bob
+    token: bob-token
+resources:
+  - id: 101
+    owner: alice
+  - id: 202
+    owner: bob
+routes:
+  - method: GET
+    path: /documents/{id}
+    operation: read
+  - method: PUT
+    path: /documents/{id}
+    operation: write

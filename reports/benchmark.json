@@ -1,0 +1,512 @@
+{
+  "commit": "a4df4722010e029bb50d87a17b10294b1b6594df",
+  "date": "2026-10-30",
+  "provider": "llm",
+  "model": "meta-models/muse-spark-open-1026",
+  "note": "Measured on this benchmark only; not a claim of real-world coverage.",
+  "definitions": [
+    "A route counts as DETECTED when its status is Confirmed.",
+    "True positive: labeled vulnerable and Confirmed.",
+    "False negative: labeled vulnerable and not Confirmed.",
+    "False negatives are counted separately as not discovered, discovered not flagged, Suspected not reproduced, or Inconclusive.",
+    "True negatives are counted separately as discovered not flagged, or flagged but not reproduced.",
+    "not discovered: static route discovery did not find the route.",
+    "discovered, not flagged: static route discovery found the route and the static heuristics did not mark it Suspected.",
+    "Suspected not reproduced: the static heuristics marked the route Suspected and the scan did not Confirm it.",
+    "flagged by static analysis is yes when the static heuristics marked the route Suspected, and no otherwise.",
+    "False positive: labeled secure and Confirmed.",
+    "True negative: labeled secure and not Confirmed.",
+    "Each run of a labeled route counts once.",
+    "An error is recorded in the table and is not a true positive, false positive, false negative, or true negative.",
+    "Plan-validity rate: accepted tests divided by proposed tests."
+  ],
+  "runs": 3,
+  "apps": [
+    {
+      "id": "helper-check-vulnerable",
+      "discovered": 2,
+      "labeled": 2,
+      "errors": [
+        "",
+        "",
+        ""
+      ],
+      "routes": [
+        {
+          "route": "GET /documents/{id}",
+          "vulnerable": true,
+          "statuses": [
+            "Confirmed",
+            "Confirmed",
+            "Confirmed"
+          ],
+          "reasons": [
+            "A non-owner or unauthenticated caller received access the matrix denies, and the owner control test for this route passed.",
+            "A non-owner or unauthenticated caller received access the matrix denies, and the owner control test for this route passed.",
+            "A non-owner or unauthenticated caller received access the matrix denies, and the owner control test for this route passed."
+          ],
+          "flagged_by_static_analysis": "yes",
+          "flagged_by_static_analysis_runs": [
+            "yes",
+            "yes",
+            "yes"
+          ],
+          "consistent": "agreed"
+        },
+        {
+          "route": "PUT /documents/{id}",
+          "vulnerable": true,
+          "statuses": [
+            "Confirmed",
+            "Confirmed",
+            "Confirmed"
+          ],
+          "reasons": [
+            "A non-owner or unauthenticated caller received access the matrix denies, and the owner control test for this route passed.",
+            "A non-owner or unauthenticated caller received access the matrix denies, and the owner control test for this route passed.",
+            "A non-owner or unauthenticated caller received access the matrix denies, and the owner control test for this route passed."
+          ],
+          "flagged_by_static_analysis": "yes",
+          "flagged_by_static_analysis_runs": [
+            "yes",
+            "yes",
+            "yes"
+          ],
+          "consistent": "agreed"
+        }
+      ]
+    },
+    {
+      "id": "helper-check-secure",
+      "discovered": 2,
+      "labeled": 2,
+      "errors": [
+        "",
+        "",
+        ""
+      ],
+      "routes": [
+        {
+          "route": "GET /documents/{id}",
+          "vulnerable": false,
+          "statuses": [
+            "discovered, not flagged",
+            "discovered, not flagged",
+            "discovered, not flagged"
+          ],
+          "reasons": [
+            "Heuristics are indicators, not proof. An ownership comparison between a resource's owner field and the current user was observed in the handler or a same-file helper.",
+            "Heuristics are indicators, not proof. An ownership comparison between a resource's owner field and the current user was observed in the handler or a same-file helper.",
+            "Heuristics are indicators, not proof. An ownership comparison between a resource's owner field and the current user was observed in the handler or a same-file helper."
+          ],
+          "flagged_by_static_analysis": "no",
+          "flagged_by_static_analysis_runs": [
+            "no",
+            "no",
+            "no"
+          ],
+          "consistent": "agreed"
+        },
+        {
+          "route": "PUT /documents/{id}",
+          "vulnerable": false,
+          "statuses": [
+            "discovered, not flagged",
+            "discovered, not flagged",
+            "discovered, not flagged"
+          ],
+          "reasons": [
+            "Heuristics are indicators, not proof. An ownership comparison between a resource's owner field and the current user was observed in the handler or a same-file helper.",
+            "Heuristics are indicators, not proof. An ownership comparison between a resource's owner field and the current user was observed in the handler or a same-file helper.",
+            "Heuristics are indicators, not proof. An ownership comparison between a resource's owner field and the current user was observed in the handler or a same-file helper."
+          ],
+          "flagged_by_static_analysis": "no",
+          "flagged_by_static_analysis_runs": [
+            "no",
+            "no",
+            "no"
+          ],
+          "consistent": "agreed"
+        }
+      ]
+    },
+    {
+      "id": "dependency-check-vulnerable",
+      "discovered": 2,
+      "labeled": 2,
+      "errors": [
+        "",
+        "",
+        ""
+      ],
+      "routes": [
+        {
+          "route": "GET /documents/{id}",
+          "vulnerable": true,
+          "statuses": [
+            "discovered, not flagged",
+            "discovered, not flagged",
+            "discovered, not flagged"
+          ],
+          "reasons": [
+            "Heuristics are indicators, not proof. Authentication and a path parameter used to look up a resource were not both observed.",
+            "Heuristics are indicators, not proof. Authentication and a path parameter used to look up a resource were not both observed.",
+            "Heuristics are indicators, not proof. Authentication and a path parameter used to look up a resource were not both observed."
+          ],
+          "flagged_by_static_analysis": "no",
+          "flagged_by_static_analysis_runs": [
+            "no",
+            "no",
+            "no"
+          ],
+          "consistent": "agreed"
+        },
+        {
+          "route": "PUT /documents/{id}",
+          "vulnerable": true,
+          "statuses": [
+            "discovered, not flagged",
+            "discovered, not flagged",
+            "discovered, not flagged"
+          ],
+          "reasons": [
+            "Heuristics are indicators, not proof. Authentication and a path parameter used to look up a resource were not both observed.",
+            "Heuristics are indicators, not proof. Authentication and a path parameter used to look up a resource were not both observed.",
+            "Heuristics are indicators, not proof. Authentication and a path parameter used to look up a resource were not both observed."
+          ],
+          "flagged_by_static_analysis": "no",
+          "flagged_by_static_analysis_runs": [
+            "no",
+            "no",
+            "no"
+          ],
+          "consistent": "agreed"
+        }
+      ]
+    },
+    {
+      "id": "dependency-check-secure",
+      "discovered": 2,
+      "labeled": 2,
+      "errors": [
+        "",
+        "",
+        ""
+      ],
+      "routes": [
+        {
+          "route": "GET /documents/{id}",
+          "vulnerable": false,
+          "statuses": [
+            "discovered, not flagged",
+            "discovered, not flagged",
+            "discovered, not flagged"
+          ],
+          "reasons": [
+            "Heuristics are indicators, not proof. Authentication and a path parameter used to look up a resource were not both observed.",
+            "Heuristics are indicators, not proof. Authentication and a path parameter used to look up a resource were not both observed.",
+            "Heuristics are indicators, not proof. Authentication and a path parameter used to look up a resource were not both observed."
+          ],
+          "flagged_by_static_analysis": "no",
+          "flagged_by_static_analysis_runs": [
+            "no",
+            "no",
+            "no"
+          ],
+          "consistent": "agreed"
+        },
+        {
+          "route": "PUT /documents/{id}",
+          "vulnerable": false,
+          "statuses": [
+            "discovered, not flagged",
+            "discovered, not flagged",
+            "discovered, not flagged"
+          ],
+          "reasons": [
+            "Heuristics are indicators, not proof. Authentication and a path parameter used to look up a resource were not both observed.",
+            "Heuristics are indicators, not proof. Authentication and a path parameter used to look up a resource were not both observed.",
+            "Heuristics are indicators, not proof. Authentication and a path parameter used to look up a resource were not both observed."
+          ],
+          "flagged_by_static_analysis": "no",
+          "flagged_by_static_analysis_runs": [
+            "no",
+            "no",
+            "no"
+          ],
+          "consistent": "agreed"
+        }
+      ]
+    },
+    {
+      "id": "uuid-ids-vulnerable",
+      "discovered": 2,
+      "labeled": 2,
+      "errors": [
+        "",
+        "",
+        ""
+      ],
+      "routes": [
+        {
+          "route": "GET /documents/{id}",
+          "vulnerable": true,
+          "statuses": [
+            "Confirmed",
+            "Confirmed",
+            "Confirmed"
+          ],
+          "reasons": [
+            "A non-owner or unauthenticated caller received access the matrix denies, and the owner control test for this route passed.",
+            "A non-owner or unauthenticated caller received access the matrix denies, and the owner control test for this route passed.",
+            "A non-owner or unauthenticated caller received access the matrix denies, and the owner control test for this route passed."
+          ],
+          "flagged_by_static_analysis": "yes",
+          "flagged_by_static_analysis_runs": [
+            "yes",
+            "yes",
+            "yes"
+          ],
+          "consistent": "agreed"
+        },
+        {
+          "route": "DELETE /documents/{id}",
+          "vulnerable": true,
+          "statuses": [
+            "Suspected",
+            "Suspected",
+            "Suspected"
+          ],
+          "reasons": [
+            "Suspected, not reproduced",
+            "Suspected, not reproduced",
+            "Suspected, not reproduced"
+          ],
+          "flagged_by_static_analysis": "yes",
+          "flagged_by_static_analysis_runs": [
+            "yes",
+            "yes",
+            "yes"
+          ],
+          "consistent": "agreed"
+        }
+      ]
+    },
+    {
+      "id": "uuid-ids-secure",
+      "discovered": 2,
+      "labeled": 2,
+      "errors": [
+        "",
+        "",
+        ""
+      ],
+      "routes": [
+        {
+          "route": "GET /documents/{id}",
+          "vulnerable": false,
+          "statuses": [
+            "discovered, not flagged",
+            "discovered, not flagged",
+            "discovered, not flagged"
+          ],
+          "reasons": [
+            "Heuristics are indicators, not proof. An ownership comparison between a resource's owner field and the current user was observed in the handler or a same-file helper.",
+            "Heuristics are indicators, not proof. An ownership comparison between a resource's owner field and the current user was observed in the handler or a same-file helper.",
+            "Heuristics are indicators, not proof. An ownership comparison between a resource's owner field and the current user was observed in the handler or a same-file helper."
+          ],
+          "flagged_by_static_analysis": "no",
+          "flagged_by_static_analysis_runs": [
+            "no",
+            "no",
+            "no"
+          ],
+          "consistent": "agreed"
+        },
+        {
+          "route": "DELETE /documents/{id}",
+          "vulnerable": false,
+          "statuses": [
+            "discovered, not flagged",
+            "discovered, not flagged",
+            "discovered, not flagged"
+          ],
+          "reasons": [
+            "Heuristics are indicators, not proof. An ownership comparison between a resource's owner field and the current user was observed in the handler or a same-file helper.",
+            "Heuristics are indicators, not proof. An ownership comparison between a resource's owner field and the current user was observed in the handler or a same-file helper.",
+            "Heuristics are indicators, not proof. An ownership comparison between a resource's owner field and the current user was observed in the handler or a same-file helper."
+          ],
+          "flagged_by_static_analysis": "no",
+          "flagged_by_static_analysis_runs": [
+            "no",
+            "no",
+            "no"
+          ],
+          "consistent": "agreed"
+        }
+      ]
+    },
+    {
+      "id": "nested-resource-vulnerable",
+      "discovered": 1,
+      "labeled": 1,
+      "errors": [
+        "",
+        "",
+        ""
+      ],
+      "routes": [
+        {
+          "route": "GET /invoices/{invoice_id}/items",
+          "vulnerable": true,
+          "statuses": [
+            "Confirmed",
+            "Confirmed",
+            "Confirmed"
+          ],
+          "reasons": [
+            "A non-owner or unauthenticated caller received access the matrix denies, and the owner control test for this route passed.",
+            "A non-owner or unauthenticated caller received access the matrix denies, and the owner control test for this route passed.",
+            "A non-owner or unauthenticated caller received access the matrix denies, and the owner control test for this route passed."
+          ],
+          "flagged_by_static_analysis": "yes",
+          "flagged_by_static_analysis_runs": [
+            "yes",
+            "yes",
+            "yes"
+          ],
+          "consistent": "agreed"
+        }
+      ]
+    },
+    {
+      "id": "nested-resource-secure",
+      "discovered": 1,
+      "labeled": 1,
+      "errors": [
+        "",
+        "",
+        ""
+      ],
+      "routes": [
+        {
+          "route": "GET /invoices/{invoice_id}/items",
+          "vulnerable": false,
+          "statuses": [
+            "Suspected",
+            "Suspected",
+            "Suspected"
+          ],
+          "reasons": [
+            "Suspected, not reproduced",
+            "Suspected, not reproduced",
+            "Suspected, not reproduced"
+          ],
+          "flagged_by_static_analysis": "yes",
+          "flagged_by_static_analysis_runs": [
+            "yes",
+            "yes",
+            "yes"
+          ],
+          "consistent": "agreed"
+        }
+      ]
+    }
+  ],
+  "totals": {
+    "tp": 12,
+    "fp": 0,
+    "fn": 9,
+    "tn": 21,
+    "errors": 0,
+    "fn_inconclusive": 0,
+    "fn_suspected": 3,
+    "fn_not_discovered": 0,
+    "fn_discovered_not_flagged": 6,
+    "tn_discovered_not_flagged": 18,
+    "tn_flagged_not_reproduced": 3,
+    "tn_not_discovered": 0,
+    "legacy": {
+      "fn_inconclusive": 0,
+      "fn_suspected": 3,
+      "fn_not_discovered": 6,
+      "Inconclusive": 0,
+      "Suspected-not-reproduced": 3,
+      "not discovered": 6
+    },
+    "precision": "1.00",
+    "recall": "0.57",
+    "plan_validity": "1.00",
+    "plan_submissions": 12,
+    "tool_calls": 54,
+    "tokens": 76583,
+    "latency_ms": 86338,
+    "discovered": 14,
+    "labeled": 14
+  },
+  "misses": [
+    {
+      "app": "dependency-check-vulnerable",
+      "route": "GET /documents/{id}",
+      "run": 1,
+      "status": "discovered, not flagged",
+      "reason": "Heuristics are indicators, not proof. Authentication and a path parameter used to look up a resource were not both observed."
+    },
+    {
+      "app": "dependency-check-vulnerable",
+      "route": "GET /documents/{id}",
+      "run": 2,
+      "status": "discovered, not flagged",
+      "reason": "Heuristics are indicators, not proof. Authentication and a path parameter used to look up a resource were not both observed."
+    },
+    {
+      "app": "dependency-check-vulnerable",
+      "route": "GET /documents/{id}",
+      "run": 3,
+      "status": "discovered, not flagged",
+      "reason": "Heuristics are indicators, not proof. Authentication and a path parameter used to look up a resource were not both observed."
+    },
+    {
+      "app": "dependency-check-vulnerable",
+      "route": "PUT /documents/{id}",
+      "run": 1,
+      "status": "discovered, not flagged",
+      "reason": "Heuristics are indicators, not proof. Authentication and a path parameter used to look up a resource were not both observed."
+    },
+    {
+      "app": "dependency-check-vulnerable",
+      "route": "PUT /documents/{id}",
+      "run": 2,
+      "status": "discovered, not flagged",
+      "reason": "Heuristics are indicators, not proof. Authentication and a path parameter used to look up a resource were not both observed."
+    },
+    {
+      "app": "dependency-check-vulnerable",
+      "route": "PUT /documents/{id}",
+      "run": 3,
+      "status": "discovered, not flagged",
+      "reason": "Heuristics are indicators, not proof. Authentication and a path parameter used to look up a resource were not both observed."
+    },
+    {
+      "app": "uuid-ids-vulnerable",
+      "route": "DELETE /documents/{id}",
+      "run": 1,
+      "status": "Suspected",
+      "reason": "Suspected, not reproduced"
+    },
+    {
+      "app": "uuid-ids-vulnerable",
+      "route": "DELETE /documents/{id}",
+      "run": 2,
+      "status": "Suspected",
+      "reason": "Suspected, not reproduced"
+    },
+    {
+      "app": "uuid-ids-vulnerable",
+      "route": "DELETE /documents/{id}",
+      "run": 3,
+      "status": "Suspected",
+      "reason": "Suspected, not reproduced"
+    }
+  ]
+}
