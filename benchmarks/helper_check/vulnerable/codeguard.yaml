@@ -1,0 +1,22 @@
+# Intentionally vulnerable benchmark app. Local testing only. Not for production.
+# Policy: only the owner can read or modify their document.
+base_url: http://127.0.0.1:8101
+target_app: benchmarks.helper_check.vulnerable.app:app
+source_dir: benchmarks/helper_check/vulnerable
+users:
+  - name: alice
+    token: alice-token
+  - name: bob
+    token: bob-token
+resources:
+  - id: 101
+    owner: alice
+  - id: 202
+    owner: bob
+routes:
+  - method: GET
+    path: /documents/{id}
+    operation: read
+  - method: PUT
+    path: /documents/{id}
+    operation: write
