@@ -172,6 +172,8 @@ BOLABuster, from Palo Alto Networks Unit 42, is an LLM-assisted multi-user BOLA 
 
 The work was done during the hackathon, 27 October through 4 November 2026, by one person, with Cursor and AI assistance. The tool calls Meta models at runtime when a provider is configured. Commit dates below are from `git log --date=short`. The log ends on 2026-11-02.
 
+History note: on 2026-11-02, commit messages on main were rewritten to remove an automated co-author trailer; file contents are unchanged. The short hashes `d7f85ab`, `a4df472`, `b7744ab`, and `521e483` in this file are those commits before that rewrite.
+
 - 2026-10-27: scaffold, vulnerable and secure fixtures, baseline tests, AST route analyzer, authorization heuristics, matrix and target config, mock provider, plan validator, executor, classifier, SQLite, scan command.
 - 2026-10-28: real model provider, tool-calling loop, patch proposal on a temporary copy, Verified Fix Gate, model-written fixes.
 - 2026-10-29: regression tests and `regress`, bypass variants, one-page HTML report, MVP checkpoint, benchmark baselines (`a4df472`, `b7744ab`, `521e483`).
