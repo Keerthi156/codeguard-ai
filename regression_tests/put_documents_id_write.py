@@ -3,8 +3,8 @@
 # Route: PUT /documents/{id}
 # Operation: write
 # Date: 2026-11-02
-# Revision: fbf687991ecf6456b626e3a039a33deaebd16492
-# Root cause: Missing object-level authorization on PUT /documents/{id}; handler loaded any document by id and applied updates without verifying the authenticated user owns it, allowing non-owners to write.
+# Revision: 320718c98693941690001c422f3bba3a46e31afc
+# Root cause: Handler verified authentication but did not verify resource ownership, allowing any authenticated user to update any document via IDOR.
 # Policy assumption: write access is owner allow, non-owner deny, unauthenticated deny.
 # Tokens and the base URL come from the environment. This file has no keys.
 # Requests are refused unless the base URL is http://127.0.0.1 or http://localhost.

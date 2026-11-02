@@ -3,8 +3,8 @@
 # Route: GET /documents/{id}
 # Operation: read
 # Date: 2026-11-02
-# Revision: fbf687991ecf6456b626e3a039a33deaebd16492
-# Root cause: Missing authorization: handler only checked authentication via require_user and returned any document by id via _existing_document(id) without verifying ownership, causing IDOR where non-owner could read another user's document.
+# Revision: 320718c98693941690001c422f3bba3a46e31afc
+# Root cause: Missing object-level authorization: handler returned document without verifying doc.owner equals authenticated user, causing IDOR allowing any valid user to read any document.
 # Policy assumption: read access is owner allow, non-owner deny, unauthenticated deny.
 # Tokens and the base URL come from the environment. This file has no keys.
 # Requests are refused unless the base URL is http://127.0.0.1 or http://localhost.
