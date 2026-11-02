@@ -21,3 +21,5 @@ Non-negotiable rules:
 Statuses: Suspected, Confirmed, Fix proposed, Verification failed, Verified, Inconclusive.
 
 Working protocol: inspect existing files first, do only the requested task, add tests, run them, never weaken a test to get green, explain failures by root cause, keep code small and typed.
+
+Never run git commit and never add Co-authored-by lines. I commit manually.

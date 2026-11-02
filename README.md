@@ -76,7 +76,7 @@ Safety rules checked in this repository:
 
 ## Results
 
-Report dates below are the `Date` fields in those files. `experiments/ai_written/PROMPT.md` says the dates in that file are UTC.
+Report headers cite commits from the private development branch, which was squashed into the final commit. Report dates below are the `Date` fields in those files. `experiments/ai_written/PROMPT.md` says the dates in that file are UTC.
 
 ### Benchmark
 
