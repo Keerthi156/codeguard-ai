@@ -1,8 +1,8 @@
 # Local testing only. Hand-written ground truth for the benchmark apps.
 # These labels were written from the source of each app, not from a CodeGuard run.
-# Pairs used while building the tool: none.
+# Pairs used to guide tool changes after the first benchmark run: dependency_check (one-level Depends following) and uuid_ids (destructive-state reset). No pair is held out; see the README changelog for dates.
 
-pairs_used_while_building: none
+pairs_used_while_building: dependency_check, uuid_ids
 
 apps:
   - id: helper-check-vulnerable

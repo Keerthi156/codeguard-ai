@@ -1,6 +1,10 @@
 # CodeGuard AI
 
-CodeGuard AI finds, proves, fixes, verifies, and regression-tests Broken Object Level Authorization (BOLA, OWASP API1) bugs in FastAPI apps. It is an entry for the Meta Global AI Developer Hackathon, Indie Developer track, theme "Push the Frontier" (software). A scan reads the app with the Python `ast` module, asks a model for a test plan, sends those tests only to localhost, and records a finding as Confirmed only when deterministic code sees unauthorized access and a passing owner control. A fix is applied only on a temporary copy, and only after a typed `y`.
+CodeGuard AI finds, proves, fixes, verifies, and regression-tests Broken Object Level Authorization (BOLA) bugs in FastAPI apps.
+
+The measured runs use Muse Spark Open: `muse-spark-1.3` on the Meta provider and `meta-models/muse-spark-open-1026` on Baseten. After the destructive-state reset, `reports/benchmark_comparison_after_reset.md` records 21 true positives, 0 false positives, and 0 false negatives for both the Meta run and the required-tests run. `reports/reliability_meta_after_guard.md` records 20 of 20 fixes verified on the first attempt. This entry targets the open-weights models category and the agentic-use category. It does not claim either one. The open-weights measurements are the Muse Spark Open runs named above. The agent proposes the test plan and the patch; deterministic code decides Confirmed and Verified.
+
+It is an entry for the Meta Global AI Developer Hackathon, Indie Developer track, theme "Push the Frontier" (software). A scan reads the app with the Python `ast` module, asks a model for a test plan, sends those tests only to localhost, and records a finding as Confirmed only when deterministic code sees unauthorized access and a passing owner control. A fix is applied only on a temporary copy, and only after a typed `y`.
 
 ## The problem
 
@@ -25,14 +29,14 @@ The fixture commands above are the ones in the `app/cli.py` module docstring. Wi
 EXPLOIT: GET /documents/101 as bob -> 200, body shows owner alice
 ```
 
-The same scan prints `2 findings, 2 confirmed`. `reports/latest.html` is the single static page written by `report` (default `--out reports/latest.html`). The copy committed at `d7f85ab` contains both of these lines:
+The same scan prints `2 findings, 2 confirmed`. `reports/latest.html` is the single static page written by `report` (default `--out reports/latest.html`). The committed page says `2 routes scanned, 2 confirmed, 2 verified and hardened, 2 regression tests saved` and contains both of these lines:
 
 ```text
 EXPLOIT (non-owner bob): GET /documents/101 as bob -> 200, body shows owner alice
 Attempt 1: VERIFIED and HARDENED
 ```
 
-The copy of `reports/latest.html` at the current commit instead says `No Confirmed findings` and `0 routes scanned, 0 confirmed`. The fixtures are intentionally vulnerable and are for local use only.
+The fixtures are intentionally vulnerable and are for local use only.
 
 ## Models
 
@@ -80,7 +84,7 @@ Report headers cite commits from the private development branch, which was squas
 
 ### Benchmark
 
-Eight apps are listed in `benchmarks/labels.yaml`. That file says `Pairs used while building the tool: none.` It does not define a held-out split. The counts below are every labeled route-run in the named file.
+Eight apps are listed in `benchmarks/labels.yaml`. That file says: `Pairs used to guide tool changes after the first benchmark run: dependency_check (one-level Depends following) and uuid_ids (destructive-state reset). No pair is held out; see the README changelog for dates.` It does not define a held-out split. The counts below are every labeled route-run in the named file.
 
 Before the destructive-state fix, from `reports/benchmark_after_dependency_fix.md`, commit `b7744ab1115061137525061404c4d94b385d5517`, date 2026-10-30, model `meta-models/muse-spark-open-1026`, 3 runs:
 
@@ -142,10 +146,11 @@ Earlier committed reports, not the final one:
 - The repository does not mention BFLA or BOPLA. The shipped matrix in `app/target_config.py` is owner-only object access.
 - Hosted-model runs are not identical every time. The Baseten benchmark above has one `model request failed` run, and journal stopped on a tool-call limit in run 3 but not in run 2.
 - The tool does not replace a security review.
+- Developed and tested with Python 3.13 on Windows. Not tested on macOS or Linux.
 
 ## Getting started
 
-`.cursor/rules/codeguard.mdc` names Python 3.11. From the repository root, in PowerShell:
+Developed and tested with Python 3.13 on Windows. From the repository root, in PowerShell:
 
 ```powershell
 python -m venv .venv
@@ -155,14 +160,20 @@ Copy-Item .env.example .env
 
 Fill names only, in `.env`: `PROVIDER`, `MODEL_API_KEY`, `MODEL_NAME`, `MODEL_BASE_URL`, `USE_MOCK_AI`, `META_API_KEY`, `META_MODEL`, `META_BASE_URL`, `BASETEN_API_KEY`, `BASETEN_MODEL`, `BASETEN_BASE_URL`, `FIREWORKS_API_KEY`, `FIREWORKS_MODEL`, `FIREWORKS_BASE_URL`. Do not commit `.env`.
 
-A first scan without a hosted model:
+A keyless smoke test uses the mock provider. It is development only, not a Meta model:
 
 ```powershell
 $env:USE_MOCK_AI = "true"
 .\.venv\Scripts\python.exe -m app.cli scan --config fixtures/codeguard.vulnerable.yaml
 ```
 
-A hosted scan uses the same command with `USE_MOCK_AI` false and `--provider meta`, `--provider baseten`, or `--provider fireworks`. The default SQLite file is `data/codeguard.db`. `fixtures/` and `benchmarks/` are intentionally vulnerable in the apps marked vulnerable, and they are for local use only.
+A real model scan uses the same config with `USE_MOCK_AI` false:
+
+```powershell
+.\.venv\Scripts\python.exe -m app.cli scan --config fixtures/codeguard.vulnerable.yaml --provider meta
+```
+
+`--provider baseten` is the other measured provider. `--provider fireworks` is accepted by configuration. No report under `reports/` records a Fireworks run. The default SQLite file is `data/codeguard.db`. `fixtures/` and `benchmarks/` are intentionally vulnerable in the apps marked vulnerable, and they are for local use only.
 
 ## Related work
 
@@ -188,7 +199,7 @@ History note: on 2026-11-02, commit messages on main were rewritten to remove an
 - `experiments/ai_written/`: ten generated apps, `PROMPT.md`, and `review.yaml`.
 - `fixtures/`: the vulnerable and secure document apps and their `codeguard` YAML files.
 - `regression_tests/`: tests exported after a verified fix.
-- `reports/`: committed measurement files.
+- `reports/`: committed measurement files. `reports/README.md` says which files the README cites, which are superseded, and which headers warn that the working tree was dirty.
 - `scripts/`: `check_all.ps1`, `generate_ai_apps.py`, and provider smoke scripts.
 - `tests/`: pytest suite.
 - `.env.example`: variable names. `.gitignore` ignores `.env`.

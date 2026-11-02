@@ -1,10 +1,10 @@
-<!-- Local testing only. Benchmark apps were not used to build the tool. -->
+<!-- Local testing only. -->
 
 # Benchmarks
 
 These eight FastAPI apps are intentionally small pairs for measuring CodeGuard on localhost after the MVP was frozen. Each vulnerable app has a secure twin. Tokens and records are synthetic and live in memory.
 
-Pairs used while building the tool: none.
+Pairs used to guide tool changes after the first benchmark run: dependency_check (one-level Depends following) and uuid_ids (destructive-state reset). No pair is held out; see the README changelog for dates.
 
 Results are reported as measured. This directory does not contain scores. A number belongs here only after a run of the frozen tool produces it.
 

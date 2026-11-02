@@ -31,11 +31,16 @@ def anyio_backend() -> str:
     return "asyncio"
 
 
-def test_readme_records_that_no_pair_was_used_while_building() -> None:
+def test_readme_records_which_pairs_guided_later_changes() -> None:
     text = (BENCH / "README.md").read_text(encoding="utf-8")
-    assert "Pairs used while building the tool: none." in text
+    sentence = (
+        "Pairs used to guide tool changes after the first benchmark run: "
+        "dependency_check (one-level Depends following) and uuid_ids (destructive-state reset). "
+        "No pair is held out; see the README changelog for dates."
+    )
+    assert sentence in text
     assert "Results are reported as measured." in text
-    assert _LABELS["pairs_used_while_building"] == "none"
+    assert _LABELS["pairs_used_while_building"] == "dependency_check, uuid_ids"
 
 
 def test_every_benchmark_file_says_local_testing_only() -> None:
