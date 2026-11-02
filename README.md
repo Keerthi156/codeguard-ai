@@ -94,7 +94,7 @@ Safety rules checked in this repository:
 
 ## Results
 
-Commit hashes in report headers refer to the private development history, which was squashed into the final commit, so they do not resolve on GitHub. Some runs were made before their code was committed, so a header hash can be older than the code that produced the report. The dates are the reference. Report dates are the `Date` fields in those files; [experiments/ai_written/PROMPT.md](experiments/ai_written/PROMPT.md) says the dates in that file are UTC.
+Commit hashes in report headers refer to the private development history, which was squashed into the final commit, so they do not resolve on GitHub. Some runs were made before their code was committed, so a header hash can be older than the code that produced the report. The dates are the reference. Report dates are the `Date` fields in those files; [experiments/ai_written/PROMPT.md](experiments/ai_written/PROMPT.md) says the dates in that file are UTC. The commit "Read each target file once and do not send the same request twice" came after the reports above; a benchmark rerun on the final code is in [reports/benchmark_comparison_final.md](reports/benchmark_comparison_final.md).
 
 ### Benchmark
 
