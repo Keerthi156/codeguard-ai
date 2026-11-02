@@ -46,6 +46,10 @@ EXPLOIT (non-owner bob): GET /documents/101 as bob -> 200, body shows owner alic
 Attempt 1: VERIFIED and HARDENED
 ```
 
+![Report summary](docs/report_top.png)
+
+![A verified and hardened finding](docs/report_verified.png)
+
 The fixtures are intentionally vulnerable and are for local use only.
 
 ## Models
@@ -139,7 +143,7 @@ After the patch-quality guard, date 2026-10-30, same outcome shape: 20 of 20 Ver
 | --- | --- | --- | --- | --- | --- | --- |
 | 10 | 10 | 35 | 0 | 14 | 1 | 2 |
 
-Not applicable is the status `Not applicable: collection route (no resource id)`. `Runnable` means the app passed the safety check and received a config; it does not mean the app started. The tool-call-limit row is journal (`tool call limit of 6 exceeded`). The two apps that did not become ready are invoices and support-tickets. The hand-check column uses [experiments/ai_written/review.yaml](experiments/ai_written/review.yaml), which records `checks_owner` for every listed `GET /{id}` and `DELETE /{id}` route and says there is no false negative. The hand-check was recorded by the author.
+Not applicable is the status `Not applicable: collection route (no resource id)`. `Runnable` means the app passed the safety check and received a config; it does not mean the app started. The tool-call-limit row is journal (`tool call limit of 6 exceeded`). The two apps that did not become ready are invoices and support-tickets. The hand-check column uses [experiments/ai_written/review.yaml](experiments/ai_written/review.yaml), which records `checks_owner` for every listed `GET /{id}` and `DELETE /{id}` route and says there is no false negative. An AI coding agent read each listed `GET /{id}` and `DELETE /{id}` handler and recorded the results in [experiments/ai_written/review.yaml](experiments/ai_written/review.yaml).
 
 Earlier committed reports, not the final one:
 
@@ -213,6 +217,7 @@ On 2026-11-02, commit messages on main were rewritten to remove an automated co-
 - `experiments/ai_written/`: ten generated apps, `PROMPT.md`, and `review.yaml`.
 - `fixtures/`: the vulnerable and secure document apps and their `codeguard` YAML files.
 - `regression_tests/`: tests exported after a verified fix.
+- `docs/`: screenshots of the report page.
 - `reports/`: committed measurement files. [reports/README.md](reports/README.md) says which files the README cites, which are superseded, and which headers warn that the working tree was dirty.
 - `scripts/`: `check_all.ps1`, `generate_ai_apps.py`, and provider smoke scripts.
 - `tests/`: pytest suite.
