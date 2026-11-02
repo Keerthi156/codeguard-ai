@@ -8,7 +8,7 @@ Models: Muse Spark 1.3 on the Meta Model API, and Muse Spark Open (`meta-models/
 
 Headline results, each measured on small local benchmarks (see the linked files):
 
-- Benchmark, 8 apps, 3 runs ([reports/benchmark_comparison_after_reset.md](reports/benchmark_comparison_after_reset.md)): Muse Spark 1.3 and a no-model run both confirmed 21 of 21 vulnerable-route runs (7 vulnerable routes × 3 runs) with 0 false positives. Muse Spark Open confirmed 20 scored runs in the first post-reset run (1 request error excluded) and 21 of 21 in a rerun on the final code ([reports/benchmark_comparison_final.md](reports/benchmark_comparison_final.md)). None of the 8 apps is held out.
+- Benchmark, 8 apps, 3 runs ([reports/benchmark_comparison_after_reset.md](reports/benchmark_comparison_after_reset.md)): Muse Spark 1.3 and a no-model run both confirmed 21 of 21 vulnerable-route runs (7 vulnerable routes × 3 runs) with 0 false positives. Muse Spark Open confirmed all 20 scored runs; 1 run errored and is excluded. A rerun on the final code (`reports/benchmark_comparison_final.md`) confirmed 21 of 21 for Muse Spark 1.3, Muse Spark Open, and the no-model run, with no errors. None of the 8 apps is held out.
 - Fix loop, 20 findings per model ([reports/reliability_baseten_after_guard.md](reports/reliability_baseten_after_guard.md) for Muse Spark Open, [reports/reliability_meta_after_guard.md](reports/reliability_meta_after_guard.md) for Muse Spark 1.3): 20 of 20 verified on the first attempt for each (10 runs × the 2 routes of the document fixture).
 - Ten apps written by Muse Spark 1.3 ([reports/ai_written_apps_run3.md](reports/ai_written_apps_run3.md)): 0 confirmed findings, 14 routes not judgeable (collection routes), 2 apps did not start, 1 stopped at a tool-call limit.
 
@@ -120,6 +120,18 @@ After the reset, from [reports/benchmark_comparison_after_reset.md](reports/benc
 
 [reports/benchmark_baseten_after_reset.md](reports/benchmark_baseten_after_reset.md) (same commit, date 2026-11-01) records `Errors: 1` and `Run 1: error: model request failed` for nested-resource-vulnerable `GET /invoices/{invoice_id}/items`. The comparison file shows that run as `error` and the other two as Confirmed. An error is not counted as a true positive, false positive, false negative, or true negative.
 
+On the final code, from `reports/benchmark_comparison_final.md` (commit `e8358e1`, working tree clean, date 2026-11-02):
+
+| Source | TP | FP | FN | TN | Precision | Recall | Plan validity |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| meta | 21 | 0 | 0 | 21 | 1.00 (21/21) | 1.00 (21/21) | 1.00 (96/96) |
+| baseten | 21 | 0 | 0 | 21 | 1.00 (21/21) | 1.00 (21/21) | 1.00 (136/136) |
+| required tests only (no model) | 21 | 0 | 0 | 21 | 1.00 (21/21) | 1.00 (21/21) | n/a (0/0) |
+
+Model runs vary from run to run: the Baseten result here differs from the earlier post-reset run (21 of 21 with no error versus 20 scored runs and 1 error). The no-model row is deterministic.
+
+Commit `e8358e1` is on GitHub, so this hash resolves, unlike the older ones.
+
 ### Fix-loop reliability
 
 Each file says `Measured on the benchmark fixtures only; not a claim of real-world reliability.` Each header says `AUTO-APPROVED (measurement mode, temporary copies only)`. The product path still requires a typed `y`.
@@ -185,7 +197,7 @@ $env:USE_MOCK_AI = "true"
 .\.venv\Scripts\python.exe -m app.cli scan --config fixtures/codeguard.vulnerable.yaml
 ```
 
-The mock setting applies to the whole PowerShell session; clear it with `Remove-Item Env:USE_MOCK_AI` before running a real provider.
+The mock setting lasts for the whole PowerShell session and overrides `.env`. Clear it with `Remove-Item Env:USE_MOCK_AI` before running a real provider.
 
 A real model scan uses the same config with `USE_MOCK_AI` false:
 
@@ -211,6 +223,7 @@ On 2026-11-02, commit messages on main were rewritten to remove an automated co-
 - 2026-10-30: provider selector, reliability measurement, benchmark provider option and no-model ablation, benchmark committed before the destructive-state fix.
 - 2026-11-01: destructive tests reset target state; benchmark after that reset; experiment command and 10 generated apps; tool-call limits, portable configs, readiness retry.
 - 2026-11-02: collection routes reported as not applicable and restart timeouts named; experiment run 3, hand-check, and the key-shaped-string check.
+- 2026-11-02: GitHub Actions test workflow, report screenshots, final-code benchmark rerun.
 
 ## Repository map
 
