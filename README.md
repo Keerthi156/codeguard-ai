@@ -8,7 +8,7 @@ Models: Muse Spark 1.3 on the Meta Model API, and Muse Spark Open (`meta-models/
 
 Headline results, each measured on small local benchmarks (see the linked files):
 
-- Benchmark, 8 apps, 3 runs ([reports/benchmark_comparison_after_reset.md](reports/benchmark_comparison_after_reset.md)): Muse Spark 1.3 and a no-model run both confirmed 21 of 21 vulnerable-route runs (7 vulnerable routes × 3 runs) with 0 false positives. Muse Spark Open confirmed all 20 scored runs; 1 run errored and is excluded. None of the 8 apps is held out.
+- Benchmark, 8 apps, 3 runs ([reports/benchmark_comparison_after_reset.md](reports/benchmark_comparison_after_reset.md)): Muse Spark 1.3 and a no-model run both confirmed 21 of 21 vulnerable-route runs (7 vulnerable routes × 3 runs) with 0 false positives. Muse Spark Open confirmed 20 scored runs in the first post-reset run (1 request error excluded) and 21 of 21 in a rerun on the final code ([reports/benchmark_comparison_final.md](reports/benchmark_comparison_final.md)). None of the 8 apps is held out.
 - Fix loop, 20 findings per model ([reports/reliability_baseten_after_guard.md](reports/reliability_baseten_after_guard.md) for Muse Spark Open, [reports/reliability_meta_after_guard.md](reports/reliability_meta_after_guard.md) for Muse Spark 1.3): 20 of 20 verified on the first attempt for each (10 runs × the 2 routes of the document fixture).
 - Ten apps written by Muse Spark 1.3 ([reports/ai_written_apps_run3.md](reports/ai_written_apps_run3.md)): 0 confirmed findings, 14 routes not judgeable (collection routes), 2 apps did not start, 1 stopped at a tool-call limit.
 
@@ -184,6 +184,8 @@ A keyless smoke test uses the mock provider. It is development only, not a Meta 
 $env:USE_MOCK_AI = "true"
 .\.venv\Scripts\python.exe -m app.cli scan --config fixtures/codeguard.vulnerable.yaml
 ```
+
+The mock setting applies to the whole PowerShell session; clear it with `Remove-Item Env:USE_MOCK_AI` before running a real provider.
 
 A real model scan uses the same config with `USE_MOCK_AI` false:
 
