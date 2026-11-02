@@ -1,13 +1,15 @@
 # CodeGuard AI
 
+[![tests](https://github.com/Keerthi156/codeguard-ai/actions/workflows/tests.yml/badge.svg)](https://github.com/Keerthi156/codeguard-ai/actions/workflows/tests.yml)
+
 CodeGuard AI finds, proves, fixes, verifies, and regression-tests Broken Object Level Authorization (BOLA, OWASP API1) bugs in FastAPI apps. It is an entry for the Meta Global AI Developer Hackathon, Indie Developer track, theme "Push the Frontier" (software).
 
 Models: Muse Spark 1.3 on the Meta Model API, and Muse Spark Open (`meta-models/muse-spark-open-1026`, open weights, served by Baseten). The agent reads the code through read-only tools, proposes the test plan and the patch, and repairs a failed fix up to twice. Deterministic code, not the model, decides Confirmed and Verified.
 
 Headline results, each measured on small local benchmarks (see the linked files):
 
-- Benchmark, 8 apps, 3 runs ([reports/benchmark_comparison_after_reset.md](reports/benchmark_comparison_after_reset.md)): Muse Spark 1.3 and a no-model run both confirmed 21 of 21 vulnerable-route runs with 0 false positives. Muse Spark Open confirmed all 20 scored runs; 1 run errored and is excluded. None of the 8 apps is held out.
-- Fix loop, 20 findings per model ([reports/reliability_baseten_after_guard.md](reports/reliability_baseten_after_guard.md) for Muse Spark Open, [reports/reliability_meta_after_guard.md](reports/reliability_meta_after_guard.md) for Muse Spark 1.3): 20 of 20 verified on the first attempt for each.
+- Benchmark, 8 apps, 3 runs ([reports/benchmark_comparison_after_reset.md](reports/benchmark_comparison_after_reset.md)): Muse Spark 1.3 and a no-model run both confirmed 21 of 21 vulnerable-route runs (7 vulnerable routes × 3 runs) with 0 false positives. Muse Spark Open confirmed all 20 scored runs; 1 run errored and is excluded. None of the 8 apps is held out.
+- Fix loop, 20 findings per model ([reports/reliability_baseten_after_guard.md](reports/reliability_baseten_after_guard.md) for Muse Spark Open, [reports/reliability_meta_after_guard.md](reports/reliability_meta_after_guard.md) for Muse Spark 1.3): 20 of 20 verified on the first attempt for each (10 runs × the 2 routes of the document fixture).
 - Ten apps written by Muse Spark 1.3 ([reports/ai_written_apps_run3.md](reports/ai_written_apps_run3.md)): 0 confirmed findings, 14 routes not judgeable (collection routes), 2 apps did not start, 1 stopped at a tool-call limit.
 
 This entry targets the open-weights category (the Muse Spark Open runs) and the agentic-use category. It does not claim either.
@@ -92,7 +94,7 @@ Commit hashes in report headers refer to the private development history, which 
 
 ### Benchmark
 
-Eight apps are listed in [benchmarks/labels.yaml](benchmarks/labels.yaml). That file says: `Pairs used to guide tool changes after the first benchmark run: dependency_check (one-level Depends following) and uuid_ids (destructive-state reset). No pair is held out; see the README changelog for dates.` It does not define a held-out split. The counts below are every labeled route-run in the named file.
+The benchmark has 8 apps (4 vulnerable and secure pairs, 14 labeled routes, 7 of them vulnerable), and each app is scanned 3 times, so the counts below are route-runs: 7 vulnerable routes × 3 runs = 21 possible true positives, and 21 true negatives from the 7 secure routes. The pairs dependency_check and uuid_ids guided later tool changes, so no pair is held out (see [benchmarks/labels.yaml](benchmarks/labels.yaml)).
 
 Before the destructive-state fix, from [reports/benchmark_after_dependency_fix.md](reports/benchmark_after_dependency_fix.md), commit `b7744ab1115061137525061404c4d94b385d5517`, date 2026-10-30, model `meta-models/muse-spark-open-1026`, 3 runs:
 
@@ -137,7 +139,7 @@ After the patch-quality guard, date 2026-10-30, same outcome shape: 20 of 20 Ver
 | --- | --- | --- | --- | --- | --- | --- |
 | 10 | 10 | 35 | 0 | 14 | 1 | 2 |
 
-Not applicable is the status `Not applicable: collection route (no resource id)`. The tool-call-limit row is journal (`tool call limit of 6 exceeded`). The two apps that did not become ready are invoices and support-tickets. The hand-check column uses [experiments/ai_written/review.yaml](experiments/ai_written/review.yaml), which records `checks_owner` for every listed `GET /{id}` and `DELETE /{id}` route and says there is no false negative. The hand-check was recorded by the author.
+Not applicable is the status `Not applicable: collection route (no resource id)`. `Runnable` means the app passed the safety check and received a config; it does not mean the app started. The tool-call-limit row is journal (`tool call limit of 6 exceeded`). The two apps that did not become ready are invoices and support-tickets. The hand-check column uses [experiments/ai_written/review.yaml](experiments/ai_written/review.yaml), which records `checks_owner` for every listed `GET /{id}` and `DELETE /{id}` route and says there is no false negative. The hand-check was recorded by the author.
 
 Earlier committed reports, not the final one:
 
@@ -156,7 +158,7 @@ Earlier committed reports, not the final one:
 - Only object-level authorization (BOLA) is tested. Function-level (BFLA) and property-level (BOPLA) issues are out of scope.
 - Hosted-model runs are not identical every time. The Baseten benchmark above has one `model request failed` run, and journal stopped on a tool-call limit in run 3 but not in run 2.
 - The tool does not replace a security review.
-- Developed with Python 3.13 on Windows. The pytest suite also runs in GitHub Actions on Ubuntu; scans with hosted models were run only on Windows.
+- Developed with Python 3.13 on Windows. The pytest suite also runs in GitHub Actions on Ubuntu with Python 3.13 (.github/workflows/tests.yml); scans with hosted models were run only on Windows.
 
 ## Getting started
 
@@ -167,6 +169,8 @@ python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
 Copy-Item .env.example .env
 ```
+
+Run the tests (no API key needed): `.\.venv\Scripts\python.exe -m pytest -q`. At the last full check this printed 225 passed, 9 skipped, 2 xfailed. The skipped tests start real local servers and are skipped by default.
 
 Fill names only, in `.env`: `PROVIDER`, `MODEL_API_KEY`, `MODEL_NAME`, `MODEL_BASE_URL`, `USE_MOCK_AI`, `META_API_KEY`, `META_MODEL`, `META_BASE_URL`, `BASETEN_API_KEY`, `BASETEN_MODEL`, `BASETEN_BASE_URL`, `FIREWORKS_API_KEY`, `FIREWORKS_MODEL`, `FIREWORKS_BASE_URL`. Do not commit `.env`.
 
@@ -187,7 +191,7 @@ A real model scan uses the same config with `USE_MOCK_AI` false:
 
 ## Related work
 
-BOLABuster, from Palo Alto Networks Unit 42, is an LLM-assisted multi-user BOLA tester. Pynt and APIsec are commercial API security testing products. As far as we know, the difference to describe from this repository is what it does here: static analysis tied to source lines, a model-proposed patch that is accepted only after the verification gate, and regression tests exported from a verified fix. This README does not claim that the other tools lack any of those.
+BOLABuster, from Palo Alto Networks Unit 42, is an LLM-assisted multi-user BOLA tester. Pynt and APIsec are commercial API security testing products. As far as we know, what this repository adds is static analysis tied to source lines, a model-proposed patch accepted only after the verification gate, and regression tests exported from a verified fix. We make no claim that the other tools lack any of these.
 
 ## How this was built
 
