@@ -97,20 +97,30 @@ def _serve_in_process(monkeypatch: pytest.MonkeyPatch) -> None:
             raise FixUsageError(f"{label} failed to start") from exc
         return _Stopped()
 
-    async def execute(tests: object, config: object, **kwargs: object) -> object:
-        if kwargs.get("transport") is None:
+    class _Live(httpx.AsyncBaseTransport):
+        """Follow the app object replaced by a reset."""
+
+        def __init__(self) -> None:
+            self._inner: httpx.ASGITransport | None = None
+            self._app: object = None
+
+        async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
             app = state["app"]
             if app is None:
                 raise RuntimeError("in-process app was not started")
-            kwargs["transport"] = httpx.ASGITransport(app=app)
+            if self._inner is None or self._app is not app:
+                self._app = app
+                self._inner = httpx.ASGITransport(app=app)
+            return await self._inner.handle_async_request(request)
+
+    async def execute(tests: object, config: object, **kwargs: object) -> object:
+        if kwargs.get("transport") is None:
+            kwargs["transport"] = _Live()
         return await execute_plan(tests, config, **kwargs)  # type: ignore[arg-type]
 
     async def execute_variants(variants: object, config: object, **kwargs: object) -> object:
         if kwargs.get("transport") is None:
-            app = state["app"]
-            if app is None:
-                raise RuntimeError("in-process app was not started")
-            kwargs["transport"] = httpx.ASGITransport(app=app)
+            kwargs["transport"] = _Live()
         return await run_variants(variants, config, **kwargs)  # type: ignore[arg-type]
 
     monkeypatch.setattr("app.cli._start_target", start_cli)

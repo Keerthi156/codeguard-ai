@@ -30,14 +30,14 @@ from app.ai.required_plan import supplement_plan
 from app.ai.validator import validate_plan
 from app.analyzer.auth_checks import assess_routes
 from app.analyzer.routes import discover_routes
-from app.config import Settings
+from app.config import Settings, load_settings
 from app.findings.classifier import Finding, classify
 from app.findings.store import FindingStore
 from app.remediation.patcher import PatchProposal, PatchRejected, materialize, propose_patch, route_for
-from app.runner.executor import TestResult, execute_plan
+from app.runner.executor import ExecutionStats, TestResult, destructive_method_set, execute_plan
 from app.runner.variants import VariantReport, build_variants, execute_variants, summarize
 from app.schemas import TestCase
-from app.target_config import TargetConfig, load_target_config
+from app.target_config import TargetConfig, load_target_config, resolve_source_dir
 
 _ALLOWED_HOSTS = frozenset({"127.0.0.1", "localhost"})
 _BEARER = re.compile(r"Bearer\s+\S+", re.IGNORECASE)
@@ -110,8 +110,12 @@ def run_fix(
     settings: Settings | None = None,
     transport: httpx.BaseTransport | None = None,
     details: bool = False,
+    provider: str | None = None,
 ) -> int:
-    """Scan, propose a fix for each Confirmed finding, and run the fix gate."""
+    """Scan, propose a fix for each Confirmed finding, and run the fix gate.
+
+    ``provider`` overrides PROVIDER for planning and for the model fix request.
+    """
     try:
         return _run(
             config_path,
@@ -121,6 +125,7 @@ def run_fix(
             settings=settings,
             transport=transport,
             details=details,
+            provider=provider,
         )
     except FixUsageError as exc:
         print(_redact(str(exc), ()), file=sys.stderr)
@@ -136,16 +141,23 @@ def _run(
     settings: Settings | None,
     transport: httpx.BaseTransport | None,
     details: bool = False,
+    provider: str | None = None,
 ) -> int:
     config = _load_config(config_path)
     tokens = [user.token for user in config.users]
     source_dir = _source_directory(config, Path(config_path))
     routes = discover_routes(source_dir)
     route_findings = assess_routes(source_dir)
-    provider = get_provider()
     try:
-        plan = provider.plan_tests(route_findings, config.matrix(), routes=routes, config=config)
-    except RuntimeError as exc:
+        if provider is not None:
+            selected = load_settings(provider=provider)
+            if settings is None:
+                settings = selected
+            planner = get_provider(selected, transport=transport)
+        else:
+            planner = get_provider(transport=transport)
+        plan = planner.plan_tests(route_findings, config.matrix(), routes=routes, config=config)
+    except (RuntimeError, ValueError) as exc:
         raise FixUsageError(_redact(str(exc), tokens)) from exc
     validated = validate_plan(plan, routes, config.matrix(), config)
     if validated.rejected:
@@ -160,20 +172,32 @@ def _run(
     if not config.target_app:
         raise FixUsageError("config error: target_app is required")
 
-    started = _start(
-        config.target_app,
-        _import_root(source_dir, config.target_app),
-        config.base_url,
-        tokens,
-        label="target app",
-    )
+    target_cwd = _import_root(source_dir, config.target_app)
+    holder: dict[str, _Running | None] = {"started": None}
+
+    def restart() -> None:
+        _restart_running(
+            holder,
+            "started",
+            lambda: _start(config.target_app or "", target_cwd, config.base_url, tokens, label="target app"),
+        )
+
+    stats = ExecutionStats()
     try:
-        before = asyncio.run(execute_plan(cases, config))
+        restart()
+        before = asyncio.run(execute_plan(cases, config, reset=restart, stats=stats))
     finally:
-        started.stop()
-    findings = classify(route_findings, before, config.matrix())
+        current = holder["started"]
+        if current is not None:
+            current.stop()
+    findings = classify(
+        route_findings,
+        before,
+        config.matrix(),
+        destructive_methods=destructive_method_set(config),
+    )
     store = FindingStore(db_path)
-    store.save_scan(findings, before, provider.model_run())
+    store.save_scan(findings, before, planner.model_run().with_resets(stats.resets))
     confirmed = [finding for finding in findings if finding.status == "Confirmed"]
     if not confirmed:
         print(_redact("0 verified, 0 verification failed, 0 inconclusive, 0 declined", tokens))
@@ -534,17 +558,28 @@ def _run_patched(
         except PatchRejected as exc:
             raise FixUsageError(f"validation error: {exc}") from exc
         base_url, patched, start_error = _start_copy(copied, config, tokens)
-        if start_error:
-            return {}, "", start_error, {}
+        if start_error or patched is None:
+            return {}, "", start_error or "patched app failed to start", {}
+        attribute = config.target_app.split(":")[-1] if config.target_app and ":" in config.target_app else "app"
+        holder: dict[str, _Running | None] = {"patched": patched}
+
+        def restart() -> None:
+            _restart_running(
+                holder,
+                "patched",
+                lambda: _start(f"app:{attribute}", copied, base_url, tokens, label="patched app"),
+            )
+
         patched_config = config.model_copy(update={"base_url": base_url})
         note = _pytest_note(copied)
         after, reports = asyncio.run(
-            _recheck(fresh, cases, before, config, patched_config, note)
+            _recheck(fresh, cases, before, config, patched_config, note, reset=restart)
         )
         return after, note, "", reports
     finally:
-        if patched is not None:
-            patched.stop()
+        running = holder["patched"] if "holder" in locals() else patched
+        if running is not None:
+            running.stop()
         if copied is not None:
             _remove_tree(copied, source_dir)
 
@@ -556,9 +591,11 @@ async def _recheck(
     config: TargetConfig,
     patched_config: TargetConfig,
     regression_note: str,
+    *,
+    reset: Callable[[], object],
 ) -> tuple[dict[str, TestResult], dict[str, VariantReport]]:
     """Re-run the plan, then the fixed variant set, while the patched app is up."""
-    rerun = await execute_plan(cases, patched_config)
+    rerun = await execute_plan(cases, patched_config, reset=reset)
     after = {result.test_id: result for result in rerun}
     reports: dict[str, VariantReport] = {}
     for item in fresh:
@@ -566,9 +603,31 @@ async def _recheck(
         if not _variants_ready(checks):
             continue
         built = build_variants(item.finding.method, item.finding.route, patched_config)
-        observed = await execute_variants(built, patched_config)
+        observed = await execute_variants(built, patched_config, reset=reset)
         reports[item.finding.id] = summarize(observed)
     return after, reports
+
+
+def _restart_running(
+    holder: dict[str, _Running | None],
+    key: str,
+    start: Callable[[], _Running],
+) -> None:
+    """Stop the current process and start it again on the same URL."""
+    current = holder[key]
+    if current is not None:
+        current.stop()
+        holder[key] = None
+    last: Exception | None = None
+    for _attempt in range(5):
+        try:
+            holder[key] = start()
+            return
+        except FixUsageError as exc:
+            last = exc
+            time.sleep(0.2)
+    if last is not None:
+        raise last
 
 
 def _variants_ready(checks: Sequence[_GateCheck]) -> bool:
@@ -1126,16 +1185,10 @@ def _load_config(config_path: str) -> TargetConfig:
 def _source_directory(config: TargetConfig, config_path: Path) -> Path:
     if not config.source_dir:
         raise FixUsageError("config error: source_dir is required")
-    raw = Path(config.source_dir)
-    if raw.is_absolute() and raw.is_dir():
-        return raw
-    candidates = [Path.cwd() / raw, config_path.parent / raw]
-    if config_path.exists():
-        candidates.extend(parent / raw for parent in config_path.resolve().parents)
-    for candidate in candidates:
-        if candidate.is_dir():
-            return candidate
-    raise FixUsageError("config error: source_dir is not a directory")
+    try:
+        return resolve_source_dir(config.source_dir, config_path)
+    except ValueError as exc:
+        raise FixUsageError(f"config error: {exc}") from exc
 
 
 def _import_root(source_dir: Path, target_app: str) -> Path:

@@ -9,8 +9,9 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import subprocess
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -20,17 +21,22 @@ from pydantic import ValidationError
 from app import cli as cli_module
 from app.ai.factory import get_provider
 from app.ai.model_run import ModelRun
+from app.config import load_settings
 from app.ai.required_plan import supplement_plan
 from app.ai.validator import validate_plan
 from app.analyzer.auth_checks import assess_routes
 from app.analyzer.routes import discover_routes
-from app.findings.classifier import classify, git_revision
-from app.runner.executor import execute_plan
-from app.target_config import TargetConfig, load_target_config
+from app.analyzer.routes import is_collection_route
+from app.findings.classifier import COLLECTION_STATUS, RESTART_TIMEOUT_STATUS, classify, git_revision
+from app.runner.executor import ExecutionStats, destructive_method_set, execute_plan
+from app.schemas import TestPlan
+from app.target_config import TargetConfig, load_target_config, reset_readiness_seconds
 
 _BEARER = re.compile(r"Bearer\s+\S+", re.IGNORECASE)
 _KEY = re.compile(r"\b(?:sk-|sk_|fw_|b10_)[A-Za-z0-9_-]{4,}\b")
 _MEASURED = "Measured on this benchmark only; not a claim of real-world coverage."
+_NO_MODEL = "required tests only (no model)"
+_DIRTY_WARNING = "WARNING: THE WORKING TREE IS DIRTY"
 _DEFINITIONS = (
     "A route counts as DETECTED when its status is Confirmed.",
     "True positive: labeled vulnerable and Confirmed.",
@@ -97,6 +103,7 @@ class Totals:
     tn_not_discovered: int
     precision: str
     recall: str
+    not_applicable: int = 0
 
 
 @dataclass(frozen=True)
@@ -115,6 +122,7 @@ class AppBlock:
     labeled: int
     routes: tuple[RouteRow, ...]
     errors: tuple[str, ...]
+    resets: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -134,6 +142,13 @@ class BenchmarkReport:
     discovered: int
     labeled: int
     misses: tuple[Miss, ...]
+    plan_accepted: int = 0
+    plan_proposed: int = 0
+    working_tree: str = "clean"
+    mode: str = ""
+    scans: int = 0
+    resets: int = 0
+    dirty_paths: tuple[str, ...] = ()
 
 
 def rate(numerator: int, denominator: int) -> str:
@@ -147,6 +162,8 @@ def trial_kind(vulnerable: bool, status: str) -> str:
     """Classify one route-run. ``error`` is kept out of the confusion matrix."""
     if status == "error":
         return "error"
+    if status == COLLECTION_STATUS or status == "Not applicable":
+        return "not_applicable"
     if vulnerable and status == "Confirmed":
         return "TP"
     if vulnerable:
@@ -174,6 +191,10 @@ def describe_route(
     """
     key = (method.upper(), path)
     flagged = "yes" if key in flagged_routes else "no"
+    if finding_status == "Not applicable" or (key in inventory and is_collection_route(path)):
+        return COLLECTION_STATUS, COLLECTION_STATUS, flagged
+    if finding_reason.startswith(RESTART_TIMEOUT_STATUS):
+        return finding_reason, finding_reason, flagged
     if finding_status:
         return finding_status, finding_reason, flagged
     if key not in inventory:
@@ -185,7 +206,7 @@ def describe_route(
 
 def fn_bucket(status: str) -> str | None:
     """Bucket a false negative. Other non-Confirmed statuses stay in the FN total only."""
-    if status == "Inconclusive":
+    if status == "Inconclusive" or status.startswith(RESTART_TIMEOUT_STATUS):
         return "Inconclusive"
     if status == "Suspected":
         return "Suspected not reproduced"
@@ -229,7 +250,7 @@ def _infer_flag(status: str) -> str:
 
 def score(rows: Sequence[RouteRow]) -> Totals:
     """Count every run of every labeled route."""
-    tp = fp = fn = tn = errors = 0
+    tp = fp = fn = tn = errors = not_applicable = 0
     inconclusive = suspected = missing = quiet = 0
     tn_quiet = tn_flagged = tn_missing = 0
     for row in rows:
@@ -250,6 +271,8 @@ def score(rows: Sequence[RouteRow]) -> Totals:
                     missing += 1
                 elif bucket == "discovered, not flagged":
                     quiet += 1
+            elif kind == "not_applicable":
+                not_applicable += 1
             elif kind == "TN":
                 tn += 1
                 if status == _NOT_FLAGGED:
@@ -275,6 +298,7 @@ def score(rows: Sequence[RouteRow]) -> Totals:
         tn_not_discovered=tn_missing,
         precision=rate(tp, tp + fp),
         recall=rate(tp, tp + fn),
+        not_applicable=not_applicable,
     )
 
 
@@ -291,18 +315,20 @@ def misses_for(rows: Sequence[RouteRow]) -> tuple[Miss, ...]:
 
 
 def render_markdown(report: BenchmarkReport) -> str:
-    lines = [
-        "# CodeGuard benchmark",
-        "",
-        f"Commit: {report.commit}",
-        f"Date: {report.date}",
-        _provider_line(report.provider),
-        f"Model: {report.model or '-'}",
-        _MEASURED,
-        "",
-        "## Definitions",
-        "",
-    ]
+    lines = ["# CodeGuard benchmark", ""]
+    lines.extend(_dirty_lines(report.working_tree, report.dirty_paths))
+    lines.extend(
+        [
+            f"Commit: {report.commit}",
+            f"Date: {report.date}",
+            _provider_line(report.provider),
+            f"Model: {report.model or '-'}",
+            f"Working tree: {report.working_tree}",
+        ]
+    )
+    if report.mode and report.mode != report.provider:
+        lines.append(report.mode)
+    lines.extend([_MEASURED, "", "## Definitions", ""])
     lines.extend(f"- {item}" for item in _DEFINITIONS)
     lines.append("")
     for app in report.apps:
@@ -350,9 +376,10 @@ def render_markdown(report: BenchmarkReport) -> str:
             f"- flagged but not reproduced: {totals.tn_flagged_not_reproduced}",
             f"- not discovered: {totals.tn_not_discovered}",
             f"Errors: {totals.errors}",
-            f"Precision: {totals.precision}",
-            f"Recall: {totals.recall}",
-            f"Plan-validity rate: {report.plan_validity}",
+            f"Not applicable: {totals.not_applicable}",
+            f"Precision: {_with_count(totals.precision, totals.tp, totals.tp + totals.fp)}",
+            f"Recall: {_with_count(totals.recall, totals.tp, totals.tp + totals.fn)}",
+            f"Plan-validity rate: {_with_count(report.plan_validity, report.plan_accepted, report.plan_proposed)}",
             f"Plan submissions: {report.plan_submissions}",
             f"Tool calls: {report.tool_calls}",
             f"Tokens: {tokens}",
@@ -381,6 +408,8 @@ def report_json(report: BenchmarkReport) -> dict[str, object]:
         "date": report.date,
         "provider": report.provider,
         "model": report.model,
+        "working_tree": report.working_tree,
+        "mode": report.mode,
         "note": _MEASURED,
         "definitions": list(_DEFINITIONS),
         "runs": report.runs,
@@ -390,6 +419,7 @@ def report_json(report: BenchmarkReport) -> dict[str, object]:
                 "discovered": app.discovered,
                 "labeled": app.labeled,
                 "errors": list(app.errors),
+                "resets": list(app.resets),
                 "routes": [
                     {
                         "route": row.route,
@@ -418,6 +448,7 @@ def report_json(report: BenchmarkReport) -> dict[str, object]:
             "tn_discovered_not_flagged": report.totals.tn_discovered_not_flagged,
             "tn_flagged_not_reproduced": report.totals.tn_flagged_not_reproduced,
             "tn_not_discovered": report.totals.tn_not_discovered,
+            "not_applicable": report.totals.not_applicable,
             "legacy": {
                 "fn_inconclusive": report.totals.fn_inconclusive,
                 "fn_suspected": report.totals.fn_suspected,
@@ -433,6 +464,10 @@ def report_json(report: BenchmarkReport) -> dict[str, object]:
             "precision": report.totals.precision,
             "recall": report.totals.recall,
             "plan_validity": report.plan_validity,
+            "plan_accepted": report.plan_accepted,
+            "plan_proposed": report.plan_proposed,
+            "scans": report.scans,
+            "resets": report.resets,
             "plan_submissions": report.plan_submissions,
             "tool_calls": report.tool_calls,
             "tokens": report.tokens,
@@ -459,8 +494,14 @@ def run_benchmark(
     out_path: str | Path = "reports/benchmark.md",
     labels_path: str | Path = "benchmarks/labels.yaml",
     transport_for: Callable[[TargetConfig], object] | None = None,
+    provider: str | None = None,
+    no_model_tests: bool = False,
 ) -> int:
-    """Scan every labeled app ``runs`` times and write markdown plus JSON."""
+    """Scan every labeled app ``runs`` times and write markdown plus JSON.
+
+    ``provider`` overrides PROVIDER. A named provider with no API key is refused
+    before any report is written, so the file is never labeled with that provider.
+    """
     if runs < 1:
         print("benchmark error: runs must be at least 1")
         return 2
@@ -469,10 +510,30 @@ def run_benchmark(
     except (OSError, ValueError, yaml.YAMLError, ValidationError) as exc:
         print(f"benchmark error: {exc}")
         return 2
-    provider_name, model_name = _provider_identity()
+    if no_model_tests:
+        provider_name, model_name = _NO_MODEL, ""
+    else:
+        try:
+            provider_name, model_name = _provider_identity(provider)
+        except RuntimeError as exc:
+            print(f"benchmark error: {' '.join(str(exc).split())}")
+            return 2
     tokens: set[str] = set()
-    measured = [_measure_app(app, runs, tokens, transport_for) for app in apps]
-    report = _assemble(measured, runs, provider_name, model_name)
+    measured = [
+        _measure_app(app, runs, tokens, transport_for, provider, no_model_tests=no_model_tests)
+        for app in apps
+    ]
+    tree = working_tree_state()
+    report = _assemble(
+        measured,
+        runs,
+        provider_name,
+        model_name,
+        working_tree=tree,
+        mode=_NO_MODEL if no_model_tests else "",
+        dirty_paths=tuple(getattr(working_tree_state, "paths", ())[:5]),
+        commit=str(getattr(working_tree_state, "commit", "") or ""),
+    )
     payload = _redact_tree(report_json(report), tokens)
     text = _redact(render_markdown(report), tokens)
     destination = Path(out_path)
@@ -480,6 +541,10 @@ def run_benchmark(
     json_path = destination.with_suffix(".json")
     destination.write_text(text, encoding="utf-8")
     json_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    if tree == "dirty":
+        print(_DIRTY_WARNING)
+    if no_model_tests:
+        print(_NO_MODEL)
     print(destination.as_posix())
     print(json_path.as_posix())
     return 0
@@ -532,6 +597,7 @@ class _Measured:
     tool_calls: int = 0
     tokens: int | None = None
     latency_ms: int = 0
+    resets: list[int] = field(default_factory=list)
 
 
 def _measure_app(
@@ -539,12 +605,15 @@ def _measure_app(
     runs: int,
     tokens: set[str],
     transport_for: Callable[[TargetConfig], object] | None,
+    provider: str | None,
+    *,
+    no_model_tests: bool = False,
 ) -> _Measured:
     per_run: list[tuple[str, list[tuple[str, str, str]], int, ModelRun | None]] = []
     discovered_counts: list[int] = []
     measured = _Measured(app, 0, [], [])
     for _run in range(runs):
-        outcome = _measure_once(app, tokens, transport_for)
+        outcome = _measure_once(app, tokens, transport_for, provider, no_model_tests=no_model_tests)
         per_run.append(outcome)
         discovered_counts.append(outcome[2])
         _add_model(measured, outcome[3])
@@ -590,9 +659,13 @@ def _measure_once(
     app: LabelApp,
     tokens: set[str],
     transport_for: Callable[[TargetConfig], object] | None,
+    provider_name: str | None,
+    *,
+    no_model_tests: bool = False,
 ) -> tuple[str, list[tuple[str, str, str]], int, ModelRun | None]:
     """Return (error, per-route status/reason/flag, discovered count, model run)."""
     started: object | None = None
+    holder: dict[str, object | None] = {"started": None}
     provider: object | None = None
     model_run: ModelRun | None = None
     discovered = 0
@@ -603,29 +676,75 @@ def _measure_once(
         routes = discover_routes(source_dir)
         discovered = len(routes)
         route_findings = assess_routes(source_dir)
-        provider = get_provider()
-        plan = provider.plan_tests(route_findings, config.matrix(), routes=routes, config=config)
-        validated = validate_plan(plan, routes, config.matrix(), config)
-        model_cases, model_tests, required_tests = supplement_plan(
-            validated.accepted,
-            route_findings,
-            config.matrix(),
-            config,
-        )
-        model_run = provider.model_run().with_counts(
-            proposed=cli_module._proposed_count(plan),
-            accepted=len(validated.accepted),
-            rejected=len(validated.rejected),
-        ).with_sources(model_tests=model_tests, required_tests=required_tests)
+        if no_model_tests:
+            required_cases, _model_tests, required_tests = supplement_plan(
+                (),
+                route_findings,
+                config.matrix(),
+                config,
+            )
+            plan = TestPlan(cases=required_cases)
+            validated = validate_plan(plan, routes, config.matrix(), config)
+            model_run = ModelRun(
+                provider=_NO_MODEL,
+                model_name="",
+                calls=0,
+                proposed=0,
+                accepted=0,
+                rejected=0,
+                total_tokens=None,
+                latency_ms=0,
+            ).with_sources(model_tests=0, required_tests=required_tests)
+        else:
+            provider = get_provider() if provider_name is None else get_provider(provider=provider_name)
+            plan = provider.plan_tests(route_findings, config.matrix(), routes=routes, config=config)
+            validated = validate_plan(plan, routes, config.matrix(), config)
+            model_cases, model_tests, required_tests = supplement_plan(
+                validated.accepted,
+                route_findings,
+                config.matrix(),
+                config,
+            )
+            model_run = provider.model_run().with_counts(
+                proposed=cli_module._proposed_count(plan),
+                accepted=len(validated.accepted),
+                rejected=len(validated.rejected),
+            ).with_sources(model_tests=model_tests, required_tests=required_tests)
         if validated.rejected:
             detail = "; ".join(
                 f"{item.id}: {', '.join(item.reasons)}" for item in validated.rejected
             )
             raise RuntimeError(f"validation error: {detail}")
-        started = cli_module._start_target(config, source_dir, sorted(tokens))
+        def restart() -> None:
+            current = holder["started"]
+            if current is not None:
+                stop = getattr(current, "stop", None)
+                if stop is not None:
+                    stop()
+                holder["started"] = None
+            holder["started"] = cli_module._start_target(
+                config,
+                source_dir,
+                sorted(tokens),
+                ready_timeout=reset_readiness_seconds(config),
+            )
+
+        holder["started"] = cli_module._start_target(config, source_dir, sorted(tokens))
+        started = holder["started"]
         transport = transport_for(config) if transport_for is not None else None
-        results = asyncio.run(execute_plan(model_cases, config, transport=transport))
-        findings = classify(route_findings, results, config.matrix())
+        cases = validated.accepted if no_model_tests else model_cases
+        stats = ExecutionStats()
+        results = asyncio.run(
+            execute_plan(cases, config, transport=transport, reset=restart, stats=stats)
+        )
+        if model_run is not None:
+            model_run = model_run.with_resets(stats.resets)
+        findings = classify(
+            route_findings,
+            results,
+            config.matrix(),
+            destructive_methods=destructive_method_set(config),
+        )
         inventory = {(item.method.upper(), item.path) for item in routes}
         flagged_routes = {
             (item.method.upper(), item.path)
@@ -658,13 +777,15 @@ def _measure_once(
         message = " ".join(str(exc).split())
         return message, [], discovered, model_run if isinstance(model_run, ModelRun) else None
     finally:
-        if started is not None:
-            stop = getattr(started, "stop", None)
+        current = holder["started"] if holder["started"] is not None else started
+        if current is not None:
+            stop = getattr(current, "stop", None)
             if stop is not None:
                 stop()
 
 
 def _add_model(measured: _Measured, model_run: ModelRun | None) -> None:
+    measured.resets.append(0 if model_run is None else model_run.resets)
     if model_run is None:
         return
     measured.proposed += model_run.proposed
@@ -681,6 +802,11 @@ def _assemble(
     runs: int,
     provider_name: str,
     model_name: str,
+    *,
+    working_tree: str = "clean",
+    mode: str = "",
+    dirty_paths: tuple[str, ...] = (),
+    commit: str = "",
 ) -> BenchmarkReport:
     apps = tuple(
         AppBlock(
@@ -689,6 +815,7 @@ def _assemble(
             len(item.app.routes),
             tuple(item.rows),
             tuple(item.errors),
+            tuple(item.resets),
         )
         for item in measured
     )
@@ -700,7 +827,7 @@ def _assemble(
         if item.tokens is not None:
             tokens = (tokens or 0) + item.tokens
     return BenchmarkReport(
-        commit=git_revision() or "unknown",
+        commit=commit or git_revision() or "unknown",
         date=datetime.now(timezone.utc).date().isoformat(),
         provider=provider_name,
         model=model_name,
@@ -715,23 +842,325 @@ def _assemble(
         discovered=sum(item.discovered for item in measured),
         labeled=sum(len(item.app.routes) for item in measured),
         misses=misses_for(rows),
+        plan_accepted=accepted,
+        plan_proposed=proposed,
+        working_tree=working_tree,
+        mode=mode,
+        scans=runs * len(measured),
+        resets=sum(sum(item.resets) for item in measured),
+        dirty_paths=tuple(dirty_paths[:5]),
     )
 
 
-def _provider_identity() -> tuple[str, str]:
+def _provider_identity(provider: str | None = None) -> tuple[str, str]:
+    """Return the provider and model that the report header may name.
+
+    A named provider whose key is missing raises. The fallback path still
+    reports unknown when MODEL_* cannot be loaded, which is the previous behavior.
+    """
     try:
-        probe = get_provider().model_run()
-    except Exception:
-        return "unknown", ""
+        settings = load_settings(provider=provider)
+    except ValueError as exc:
+        raise RuntimeError(str(exc)) from None
+    if settings.use_mock_ai or not settings.provider:
+        try:
+            probe = get_provider(settings).model_run()
+        except Exception:
+            return "unknown", ""
+        return probe.provider, probe.model_name
+    probe = get_provider(settings).model_run()
     return probe.provider, probe.model_name
 
 
 def _provider_line(provider: str) -> str:
+    if provider == _NO_MODEL:
+        return _NO_MODEL
     if provider == "mock":
         return "Provider: mock (development only)"
     if provider == "unknown" or not provider:
         return "Provider: unknown"
     return f"Provider: {provider}"
+
+
+def _with_count(shown: str, numerator: int, denominator: int) -> str:
+    """Keep the existing rate and print the count it came from."""
+    return f"{shown} ({numerator}/{denominator})"
+
+
+def working_tree_state() -> str:
+    """Return dirty, clean, or unknown.
+
+    Reports, regression tests, and the SQLite database are this command's own
+    output. They do not make the tree dirty. The first five other paths are
+    stored on this function for the report header.
+    """
+    state, paths, commit = _read_working_tree()
+    working_tree_state.paths = paths  # type: ignore[attr-defined]
+    working_tree_state.commit = commit  # type: ignore[attr-defined]
+    return state
+
+
+working_tree_state.paths = ()  # type: ignore[attr-defined]
+working_tree_state.commit = "unknown"  # type: ignore[attr-defined]
+
+
+def _read_working_tree() -> tuple[str, tuple[str, ...], str]:
+    """Return the state, every relevant dirty path, and the exact HEAD hash."""
+    try:
+        status = subprocess.run(
+            ["git", "status", "--porcelain=v1", "--untracked-files=all"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+        head = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return "unknown", (), "unknown"
+    commit = head.stdout.strip() if head.returncode == 0 and head.stdout.strip() else "unknown"
+    if status.returncode != 0:
+        return "unknown", (), commit
+    paths = tuple(path for path in _status_paths(status.stdout) if not _ignored_output(path))
+    return ("dirty" if paths else "clean"), paths, commit
+
+
+def _status_paths(stdout: str) -> list[str]:
+    """Paths from porcelain v1. A rename contributes both sides."""
+    found: list[str] = []
+    for line in stdout.splitlines():
+        if len(line) < 4:
+            continue
+        raw = line[3:].strip()
+        pieces = raw.split(" -> ", 1) if " -> " in raw else [raw]
+        for piece in pieces:
+            path = piece.strip()
+            if len(path) >= 2 and path[0] == '"' and path[-1] == '"':
+                path = path[1:-1]
+            path = path.replace("\\", "/").strip("/")
+            if path:
+                found.append(path)
+    return found
+
+
+def _ignored_output(path: str) -> bool:
+    """True for generated reports, exported regression tests, and the local database."""
+    if path == "reports" or path.startswith("reports/"):
+        return True
+    if path == "regression_tests" or path.startswith("regression_tests/"):
+        return True
+    parent, slash, name = path.rpartition("/")
+    return bool(slash) and parent == "data" and name.endswith(".db")
+
+
+def _dirty_lines(state: str, paths: Sequence[str]) -> list[str]:
+    """The warning and the first five paths. The lines never include file contents."""
+    if state != "dirty":
+        return []
+    lines = [_DIRTY_WARNING]
+    lines.extend(list(paths)[:5])
+    lines.append("")
+    return lines
+
+
+def run_benchmark_compare(
+    *,
+    files: Sequence[str],
+    out_path: str | Path = "reports/benchmark_comparison.md",
+) -> int:
+    """Read benchmark JSON files and write one comparison table."""
+    if not files:
+        print("benchmark error: at least one file is required")
+        return 2
+    loaded: list[dict[str, object]] = []
+    for item in files:
+        path = _json_sibling(Path(item))
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            print(f"benchmark error: {path.as_posix()}: {' '.join(str(exc).split())}")
+            return 2
+        if not isinstance(raw, dict):
+            print(f"benchmark error: {path.as_posix()}: expected a JSON object")
+            return 2
+        loaded.append(raw)
+    tree = working_tree_state()
+    text = _redact(
+        render_comparison(
+            loaded,
+            working_tree=tree,
+            commit=str(getattr(working_tree_state, "commit", "") or git_revision() or "unknown"),
+            dirty_paths=tuple(getattr(working_tree_state, "paths", ())[:5]),
+        ),
+        set(),
+    )
+    destination = Path(out_path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_text(text, encoding="utf-8")
+    if tree == "dirty":
+        print(_DIRTY_WARNING)
+    print(destination.as_posix())
+    return 0
+
+
+def render_comparison(
+    reports: Sequence[dict[str, object]],
+    *,
+    working_tree: str = "clean",
+    commit: str = "",
+    dirty_paths: Sequence[str] = (),
+) -> str:
+    """One table of benchmark results, plus the routes whose statuses differ."""
+    lines = ["# CodeGuard benchmark comparison", ""]
+    lines.extend(_dirty_lines(working_tree, dirty_paths))
+    shown_commit = commit or git_revision() or "unknown"
+    lines.extend(
+        [
+            f"Commit: {shown_commit}",
+            f"Working tree: {working_tree}",
+            _MEASURED,
+            "",
+            "## Results",
+            "",
+            "| Source | TP | FP | FN | TN | Precision | Recall | Plan validity | Mean tokens per scan | Mean latency per scan |",
+            "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+        ]
+    )
+    for report in reports:
+        lines.append(_comparison_row(report))
+    lines.extend(["", "## Routes that differ", ""])
+    differed = _differing_routes(reports)
+    if not differed:
+        lines.append("(none)")
+    else:
+        lines.extend(differed)
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _comparison_row(report: dict[str, object]) -> str:
+    totals = report.get("totals")
+    counts = totals if isinstance(totals, dict) else {}
+    tp = _as_int(counts.get("tp"))
+    fp = _as_int(counts.get("fp"))
+    fn = _as_int(counts.get("fn"))
+    tn = _as_int(counts.get("tn"))
+    accepted = _as_int(counts.get("plan_accepted"))
+    proposed = _as_int(counts.get("plan_proposed"))
+    scans = _scan_count(report)
+    precision = rate(tp, tp + fp)
+    recall = rate(tp, tp + fn)
+    validity = str(counts.get("plan_validity") or rate(accepted, proposed))
+    tokens = counts.get("tokens")
+    latency = counts.get("latency_ms")
+    return "| " + " | ".join(
+        (
+            _source_name(report),
+            str(tp),
+            str(fp),
+            str(fn),
+            str(tn),
+            _with_count(precision, tp, tp + fp),
+            _with_count(recall, tp, tp + fn),
+            _with_count(validity, accepted, proposed),
+            _mean_cell(tokens, scans, ""),
+            _mean_cell(latency, scans, " ms"),
+        )
+    ) + " |"
+
+
+def _source_name(report: dict[str, object]) -> str:
+    mode = report.get("mode")
+    if isinstance(mode, str) and mode.strip():
+        return mode
+    provider = report.get("provider")
+    if isinstance(provider, str) and provider.strip():
+        return provider
+    return "unknown"
+
+
+def _scan_count(report: dict[str, object]) -> int:
+    scans = report.get("scans")
+    if isinstance(scans, int) and not isinstance(scans, bool) and scans > 0:
+        return scans
+    totals = report.get("totals")
+    if isinstance(totals, dict):
+        nested = totals.get("scans")
+        if isinstance(nested, int) and not isinstance(nested, bool) and nested > 0:
+            return nested
+    runs = report.get("runs")
+    apps = report.get("apps")
+    if isinstance(runs, int) and not isinstance(runs, bool) and isinstance(apps, list):
+        return runs * len(apps)
+    return 0
+
+
+def _mean_cell(total: object, scans: int, unit: str) -> str:
+    if isinstance(total, bool) or not isinstance(total, int) or scans <= 0:
+        return "n/a"
+    shown = f"{total / scans:.1f}"
+    if shown.endswith(".0"):
+        shown = shown[:-2]
+    return f"{shown}{unit} ({total}/{scans})"
+
+
+def _differing_routes(reports: Sequence[dict[str, object]]) -> list[str]:
+    names = [_source_name(report) for report in reports]
+    grouped: dict[str, list[str]] = {}
+    order: list[str] = []
+    for index, report in enumerate(reports):
+        for key, statuses in _route_statuses(report).items():
+            if key not in grouped:
+                grouped[key] = ["-"] * len(reports)
+                order.append(key)
+            grouped[key][index] = statuses
+    lines: list[str] = []
+    for key in order:
+        values = grouped[key]
+        if len(set(values)) <= 1:
+            continue
+        detail = "; ".join(f"{name}={value}" for name, value in zip(names, values, strict=True))
+        lines.append(f"{key}: {detail}")
+    return lines
+
+
+def _route_statuses(report: dict[str, object]) -> dict[str, str]:
+    found: dict[str, str] = {}
+    apps = report.get("apps")
+    if not isinstance(apps, list):
+        return found
+    for app in apps:
+        if not isinstance(app, dict):
+            continue
+        app_id = str(app.get("id") or "")
+        routes = app.get("routes")
+        if not isinstance(routes, list):
+            continue
+        for route in routes:
+            if not isinstance(route, dict):
+                continue
+            name = str(route.get("route") or "")
+            statuses = route.get("statuses")
+            rendered = ", ".join(str(item) for item in statuses) if isinstance(statuses, list) else ""
+            found[f"{app_id} {name}".strip()] = rendered
+    return found
+
+
+def _json_sibling(path: Path) -> Path:
+    if path.suffix.lower() == ".json":
+        return path
+    return path.with_suffix(".json")
+
+
+def _as_int(value: object) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        return 0
+    return value
 
 
 def _redact(text: str, tokens: set[str]) -> str:

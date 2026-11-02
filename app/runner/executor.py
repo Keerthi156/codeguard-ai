@@ -8,24 +8,28 @@ store the Authorization header.
 from __future__ import annotations
 
 import asyncio
+import importlib
 import re
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
+from dataclasses import dataclass
 from typing import Literal
 from urllib.parse import quote, urlsplit
 
 import httpx
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.analyzer.routes import is_collection_route
 from app.schemas import TestCase
-from app.target_config import TargetConfig
+from app.target_config import TargetConfig, request_timeout_seconds
 
-DEFAULT_TIMEOUT_SECONDS = 2.0
 _BODY_LIMIT = 300
 _ALLOWED_HOSTS = frozenset({"127.0.0.1", "localhost"})
 _WRITE_METHODS = frozenset({"POST", "PUT", "PATCH"})
 _SYNTHETIC_BODY = {"title": "synthetic", "content": "synthetic"}
 _PLACEHOLDER = re.compile(r"\{[A-Za-z_][A-Za-z0-9_]*\}")
 _REFUSAL = "request refused because the URL is not http://127.0.0.1 or http://localhost"
+CANNOT_RESET = "cannot reset target state"
+STATE_TAINTED = "resource deleted earlier in this session"
 
 Access = Literal["allowed", "denied"]
 Outcome = Literal["pass", "fail", "inconclusive"]
@@ -56,10 +60,85 @@ class TestResult(BaseModel):
     matches_expected: bool | None
     outcome: Outcome
     evidence: Evidence
+    session: int = 0
 
 
 class _Refused(Exception):
     """The test tried to address a URL this executor will not call."""
+
+
+@dataclass
+class ExecutionStats:
+    """How many times one plan restored the target before a destructive test."""
+
+    resets: int = 0
+
+
+def destructive_method_set(config: TargetConfig) -> frozenset[str]:
+    """Methods that remove a resource. Missing config uses DELETE."""
+    try:
+        raw = config.destructive_methods
+    except AttributeError:
+        raw = None
+    if raw is None:
+        return frozenset({"DELETE"})
+    return frozenset(str(item).upper() for item in raw)
+
+
+def resource_key(path: str) -> str:
+    """Identity of the object a request addressed, ignoring a query string."""
+    concrete = path.split("?", 1)[0].split("#", 1)[0]
+    if len(concrete) > 1 and concrete.endswith("/"):
+        concrete = concrete[:-1]
+    return concrete
+
+
+def resolve_reset(
+    config: TargetConfig,
+    override: Callable[[], object] | None,
+) -> Callable[[], object] | None:
+    """Use the caller's reset. Otherwise use the configured import path, and nothing else."""
+    if override is not None:
+        return override
+    try:
+        spec = config.reset
+    except AttributeError:
+        spec = None
+    if not isinstance(spec, str) or not spec or ":" not in spec:
+        return None
+    module_name, _, attribute = spec.partition(":")
+    if not module_name or not attribute:
+        return None
+
+    def call() -> None:
+        module = importlib.import_module(module_name)
+        function = getattr(module, attribute)
+        function()
+
+    return call
+
+
+def apply_state_taint(
+    results: Sequence[TestResult],
+    destructive_methods: Sequence[str] | None = None,
+) -> list[TestResult]:
+    """A later result on a resource deleted earlier in the same session is inconclusive.
+
+    A reset starts a new session, so a fresh target is not tainted by an earlier one.
+    A tainted 404 is not a denial and not a pass.
+    """
+    methods = {item.upper() for item in (destructive_methods or ("DELETE",))}
+    deleted: dict[int, set[str]] = {}
+    output: list[TestResult] = []
+    for result in results:
+        key = resource_key(result.evidence.path)
+        if key and key in deleted.get(result.session, set()):
+            output.append(_tainted(result))
+            continue
+        output.append(result)
+        if key and _removed_resource(result, methods):
+            deleted.setdefault(result.session, set()).add(key)
+    return output
 
 
 async def execute_plan(
@@ -67,23 +146,62 @@ async def execute_plan(
     config: TargetConfig,
     *,
     transport: httpx.AsyncBaseTransport | None = None,
-    timeout: float = DEFAULT_TIMEOUT_SECONDS,
+    timeout: float | None = None,
+    reset: Callable[[], object] | None = None,
+    stats: ExecutionStats | None = None,
 ) -> list[TestResult]:
-    """Run each test against ``config.base_url`` and return sanitized results."""
+    """Run each test against ``config.base_url`` and return sanitized results.
+
+    Non-destructive tests share one session. Each destructive test runs only
+    after the target is restored, in its own session. Without a reset, a
+    destructive test is not sent.
+    """
     base_url = _require_localhost(config.base_url)
     tokens = {user.name: user.token for user in config.users}
     token_values = [token for token in tokens.values() if token]
+    methods = destructive_method_set(config)
+    reset_fn = resolve_reset(config, reset)
+    counted = stats if stats is not None else ExecutionStats()
+    limit = float(timeout) if timeout is not None else request_timeout_seconds(config)
+    runnable = [test for test in tests if not is_collection_route(test.route)]
+    shared = [test for test in runnable if test.method.upper() not in methods]
+    isolated = [test for test in runnable if test.method.upper() in methods]
     results: list[TestResult] = []
     async with httpx.AsyncClient(
         transport=transport,
         base_url=base_url,
-        timeout=httpx.Timeout(timeout),
+        timeout=httpx.Timeout(limit),
         trust_env=False,
         follow_redirects=False,
     ) as client:
-        for test in tests:
-            results.append(await _execute_one(client, test, base_url, tokens, token_values, timeout))
-    return results
+        for test in shared:
+            result = await _execute_one(client, test, base_url, tokens, token_values, limit)
+            results.append(result.model_copy(update={"session": 0}))
+        session = 0
+        for test in isolated:
+            if reset_fn is None:
+                results.append(_inconclusive(test, None, CANNOT_RESET, token_values))
+                continue
+            if not await _call_reset(reset_fn):
+                results.append(_inconclusive(test, None, CANNOT_RESET, token_values))
+                continue
+            counted.resets += 1
+            session += 1
+            current = _require_localhost(config.base_url)
+            client.base_url = current
+            result = await _execute_one(client, test, current, tokens, token_values, limit)
+            results.append(result.model_copy(update={"session": session}))
+    return apply_state_taint(results, methods)
+
+
+async def _call_reset(reset: Callable[[], object]) -> bool:
+    try:
+        outcome = reset()
+        if isinstance(outcome, Awaitable):
+            await outcome
+    except Exception:
+        return False
+    return True
 
 
 async def _execute_one(
@@ -178,6 +296,27 @@ def _result(
         matches_expected=matches_expected,
         outcome=outcome,
         evidence=evidence,
+    )
+
+
+def _removed_resource(result: TestResult, methods: set[str]) -> bool:
+    if result.evidence.method.upper() not in methods:
+        return False
+    if result.outcome != "pass" or result.access != "allowed":
+        return False
+    code = result.status_code
+    return code is not None and 200 <= code < 300
+
+
+def _tainted(result: TestResult) -> TestResult:
+    evidence = result.evidence.model_copy(update={"body": STATE_TAINTED})
+    return result.model_copy(
+        update={
+            "access": None,
+            "matches_expected": None,
+            "outcome": "inconclusive",
+            "evidence": evidence,
+        }
     )
 
 

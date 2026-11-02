@@ -1,0 +1,30 @@
+# Owner-only policy. This file is the template, not model output.
+# Port 8000 is a placeholder. The runner picks a free port and does not rewrite this file.
+# source_dir is relative to this file.
+base_url: http://127.0.0.1:8000
+target_app: app:app
+source_dir: "."
+users:
+  - name: alice
+    token: alice-token
+  - name: bob
+    token: bob-token
+resources:
+  - id: "alice-contact-1"
+    owner: alice
+  - id: "alice-contact-2"
+    owner: alice
+  - id: "bob-contact-1"
+    owner: bob
+  - id: "bob-contact-2"
+    owner: bob
+routes:
+  - method: GET
+    path: "/contacts"
+    operation: read
+  - method: POST
+    path: "/contacts"
+    operation: write
+  - method: DELETE
+    path: "/contacts/{contact_id}"
+    operation: write

@@ -16,6 +16,11 @@ _PATH_PARAMETER = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)(?::[^{}]*)?\}")
 _Function = ast.FunctionDef | ast.AsyncFunctionDef
 
 
+def is_collection_route(path: str) -> bool:
+    """True when the path has no resource id, such as GET /notes."""
+    return _PATH_PARAMETER.search(path) is None
+
+
 class DiscoveredRoute(BaseModel):
     """One HTTP route found in source."""
 

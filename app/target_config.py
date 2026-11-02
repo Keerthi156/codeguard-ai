@@ -54,13 +54,28 @@ class TargetConfig(BaseModel):
     routes: list[TargetRoute] = Field(min_length=1)
     target_app: str | None = None
     source_dir: str | None = None
+    destructive_methods: list[HttpMethod] = Field(default_factory=lambda: ["DELETE"])
+    reset: str | None = None
+    request_timeout: float = Field(default=10.0, gt=0)
+    reset_readiness_timeout: float = Field(default=20.0, gt=0)
+
+    @field_validator("destructive_methods", mode="before")
+    @classmethod
+    def uppercase_destructive_methods(cls, value: object) -> object:
+        if value is None:
+            return ["DELETE"]
+        if isinstance(value, str):
+            value = [value]
+        if isinstance(value, list):
+            return [item.upper() if isinstance(item, str) else item for item in value]
+        return value
 
     @field_validator("base_url")
     @classmethod
     def localhost_only(cls, value: str) -> str:
         return _normalize_base_url(value)
 
-    @field_validator("target_app", "source_dir", mode="before")
+    @field_validator("target_app", "source_dir", "reset", mode="before")
     @classmethod
     def blank_optional(cls, value: object) -> object:
         if value is None:
@@ -77,6 +92,15 @@ class TargetConfig(BaseModel):
             return None
         if _APP_TARGET.fullmatch(value) is None:
             raise ValueError("target_app must be a module:attribute import path")
+        return value
+
+    @field_validator("reset")
+    @classmethod
+    def reset_import_path(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if _APP_TARGET.fullmatch(value) is None:
+            raise ValueError("reset must be a module:attribute import path")
         return value
 
     @field_validator("source_dir")
@@ -104,12 +128,44 @@ class TargetConfig(BaseModel):
         )
 
 
+def request_timeout_seconds(config: object) -> float:
+    """Per-request timeout. Missing or invalid config uses 10 seconds."""
+    value = getattr(config, "request_timeout", None)
+    if isinstance(value, (int, float)) and float(value) > 0:
+        return float(value)
+    return 10.0
+
+
+def reset_readiness_seconds(config: object) -> float:
+    """How long to wait for the target after a reset. Missing config uses 20 seconds."""
+    value = getattr(config, "reset_readiness_timeout", None)
+    if isinstance(value, (int, float)) and float(value) > 0:
+        return float(value)
+    return 20.0
+
+
 def load_target_config(path: str | Path) -> TargetConfig:
     """Read and validate a codeguard YAML file."""
     raw = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
     if not isinstance(raw, dict):
         raise ValueError("codeguard config must be a mapping")
     return TargetConfig.model_validate(raw)
+
+
+def resolve_source_dir(source_dir: str, config_path: Path) -> Path:
+    """Resolve a source directory. Relative paths are tried beside the config first."""
+    raw = Path(source_dir)
+    if raw.is_absolute():
+        if raw.is_dir():
+            return raw
+        raise ValueError("source_dir is not a directory")
+    candidates = [config_path.parent / raw, Path.cwd() / raw]
+    if config_path.exists():
+        candidates.extend(parent / raw for parent in config_path.resolve().parents)
+    for candidate in candidates:
+        if candidate.is_dir():
+            return candidate
+    raise ValueError("source_dir is not a directory")
 
 
 def _normalize_base_url(value: str) -> str:

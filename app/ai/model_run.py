@@ -23,6 +23,9 @@ class ModelRun:
     plan_submissions: int = 0
     model_tests: int = 0
     required_tests: int = 0
+    resets: int = 0
+    tool_call_limit: int = 6
+    turn_limit: int = 6
 
     def with_counts(self, *, proposed: int, accepted: int, rejected: int) -> ModelRun:
         return replace(self, proposed=proposed, accepted=accepted, rejected=rejected)
@@ -30,6 +33,10 @@ class ModelRun:
     def with_sources(self, *, model_tests: int, required_tests: int) -> ModelRun:
         """Record model-proposed cases separately from the required set."""
         return replace(self, model_tests=model_tests, required_tests=required_tests)
+
+    def with_resets(self, resets: int) -> ModelRun:
+        """Record how many times this scan restored the target before a destructive test."""
+        return replace(self, resets=resets)
 
     def trace_json(self) -> str:
         """Tool name, argument summary, and turn. No reasoning text and no keys."""
@@ -61,6 +68,9 @@ class ModelRun:
                 f"Plan submissions: {self.plan_submissions}",
                 f"Model tests: {self.model_tests}",
                 f"Required tests: {self.required_tests}",
+                f"Resets: {self.resets}",
+                f"Tool call limit: {self.tool_call_limit}",
+                f"Model turn limit: {self.turn_limit}",
             )
         )
 

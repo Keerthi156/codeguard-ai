@@ -1,0 +1,35 @@
+# Hand labels for generated apps.
+# Each app name maps "METHOD /path" to one of:
+#   checks_owner: the handler compares the caller to the resource owner
+#   false_negative: the handler does not check the owner, and the tool did not confirm it
+#   true_positive: the handler does not check the owner, and the tool confirmed it
+#   false_positive: the handler checks the owner, and the tool confirmed a bug
+#   unreviewed: not read
+# A missing route is unreviewed.
+# Read on 2026-11-02. Every GET /{id} and DELETE /{id} handler compares the
+# caller to the owner (bookmarks uses the field "user"). No false negative.
+bookmarks:
+  "DELETE /bookmarks/{bookmark_id}": checks_owner
+contacts:
+  "DELETE /contacts/{contact_id}": checks_owner
+expenses:
+  "GET /expenses/{expense_id}": checks_owner
+  "DELETE /expenses/{expense_id}": checks_owner
+invoices:
+  "GET /invoices/{invoice_id}": checks_owner
+journal:
+  "GET /entries/{entry_id}": checks_owner
+  "DELETE /entries/{entry_id}": checks_owner
+notes:
+  "GET /notes/{note_id}": checks_owner
+  "DELETE /notes/{note_id}": checks_owner
+reading-list:
+  "DELETE /reading-list/{item_id}": checks_owner
+recipes:
+  "GET /recipes/{recipe_id}": checks_owner
+  "DELETE /recipes/{recipe_id}": checks_owner
+support-tickets:
+  "GET /tickets/{ticket_id}": checks_owner
+tasks:
+  "GET /tasks/{task_id}": checks_owner
+  "DELETE /tasks/{task_id}": checks_owner

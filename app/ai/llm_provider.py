@@ -30,9 +30,10 @@ logger = logging.getLogger(__name__)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 
-DEFAULT_REQUEST_CAP = 18
+DEFAULT_REQUEST_CAP = 54
 MAX_TURNS = 6
 MAX_TOOL_CALLS = 6
+_TOOL_CALL_CAP = 16
 _TIMEOUT_SECONDS = 60.0
 _MAX_TOKENS = 4000
 _HTTP_ATTEMPTS = 3
@@ -95,8 +96,21 @@ class _Assistant:
     raw_calls: tuple[dict[str, object], ...]
 
 
+def planning_limits(flagged_routes: int) -> tuple[int, int]:
+    """Return the tool-call cap and the turn cap for one app.
+
+    Two or fewer flagged routes keep the original caps of 6 and 6.
+    Larger apps use 4 plus the flagged routes, never more than 16 tool calls,
+    and two extra turns beyond that tool-call cap.
+    """
+    if flagged_routes <= 2:
+        return MAX_TOOL_CALLS, MAX_TURNS
+    tool_calls = min(_TOOL_CALL_CAP, 4 + flagged_routes)
+    return tool_calls, tool_calls + 2
+
+
 class LLMProvider:
-    """Draft a test plan through at most six model turns and six tool calls."""
+    """Draft a test plan through a tool loop whose caps follow the flagged routes."""
 
     def __init__(
         self,
@@ -113,6 +127,8 @@ class LLMProvider:
         self._total_tokens: int | None = None
         self._turns = 0
         self._tool_calls = 0
+        self._tool_call_limit = MAX_TOOL_CALLS
+        self._turn_limit = MAX_TURNS
         self._faults = 0
         self._json_mode = False
         self._trace: list[tuple[str, str, int]] = []
@@ -138,6 +154,7 @@ class LLMProvider:
         self._matrix = matrix
         self._config = config if isinstance(config, TargetConfig) else None
         suspected = [finding for finding in findings if finding.status == "Suspected"]
+        self._tool_call_limit, self._turn_limit = planning_limits(len(suspected))
         if not suspected:
             return TestPlan(cases=[])
         messages: list[dict[str, object]] = [
@@ -145,8 +162,8 @@ class LLMProvider:
             {"role": "user", "content": "Inspect the suspected routes with the tools, then submit_plan."},
         ]
         while self.submitted_plan is None:
-            if self._turns >= MAX_TURNS:
-                raise RuntimeError(f"model turn limit of {MAX_TURNS} exceeded")
+            if self._turns >= self._turn_limit:
+                raise RuntimeError(f"model turn limit of {self._turn_limit} exceeded")
             try:
                 assistant = self._call_model(messages, include_tools=not self._json_mode)
             except _ToolsUnsupported:
@@ -170,7 +187,7 @@ class LLMProvider:
     def model_run(self) -> ModelRun:
         """Counts and the tool trace. The API key is not included."""
         return ModelRun(
-            provider="llm",
+            provider=self._settings.provider or "llm",
             model_name=self._settings.model_name,
             calls=self._requests,
             proposed=0,
@@ -181,6 +198,8 @@ class LLMProvider:
             tool_trace=tuple(self._trace),
             tool_mode=self._tool_mode,
             plan_submissions=self._plan_submissions,
+            tool_call_limit=self._tool_call_limit,
+            turn_limit=self._turn_limit,
         )
 
     def _reset(self) -> None:
@@ -215,8 +234,8 @@ class LLMProvider:
         matrix: AuthorizationMatrix,
         call: _Call,
     ) -> None:
-        if self._tool_calls >= MAX_TOOL_CALLS:
-            raise RuntimeError(f"tool call limit of {MAX_TOOL_CALLS} exceeded")
+        if self._tool_calls >= self._tool_call_limit:
+            raise RuntimeError(f"tool call limit of {self._tool_call_limit} exceeded")
         self._tool_calls += 1
         summary, result, done = _execute(findings, matrix, call)
         shown = call.name if call.name in _TOOL_NAMES else summary
@@ -307,6 +326,7 @@ class LLMProvider:
                 raise RuntimeError("model request failed") from None
             latency_ms = _elapsed_ms(started)
             self._latency_ms += latency_ms
+            _read_body(response)
             if response.status_code == 400 and include_tools:
                 raise _ToolsUnsupported()
             if response.status_code >= 500:
@@ -594,6 +614,14 @@ def _token_count(value: object) -> int | None:
 
 def _elapsed_ms(started: float) -> int:
     return int((time.perf_counter() - started) * 1000)
+
+
+def _read_body(response: httpx.Response) -> None:
+    """Load a streamed body before status checks or json(). Errors stay status-only."""
+    try:
+        response.read()
+    except httpx.StreamError:
+        raise RuntimeError("model request failed") from None
 
 
 def _dump(value: object) -> str:

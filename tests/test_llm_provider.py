@@ -12,14 +12,14 @@ import httpx
 import pytest
 
 from app.ai.factory import get_provider
-from app.ai.llm_provider import LLMProvider
+from app.ai.llm_provider import LLMProvider, planning_limits
 from app.ai.mock_provider import MockProvider
 from app.ai.provider import Provider
 from app.ai.validator import validate_plan
 from app.analyzer.auth_checks import RouteFinding, assess_routes
 from app.analyzer.routes import discover_routes
 from app.cli import main
-from app.config import Settings
+from app.config import Settings, load_settings
 from app.runner.executor import Evidence, TestResult
 from app.schemas import AuthorizationMatrix, Resource, TestPlan, User, default_owner_only_matrix
 from app.target_config import load_target_config
@@ -81,6 +81,21 @@ def _reply(content: str | None, *, reasoning: str = _REASONING) -> dict[str, obj
         "usage": {"prompt_tokens": 3, "completion_tokens": 4, "total_tokens": 7, "reasoning_tokens": 99},
         "choices": [{"message": message}],
     }
+
+
+class _Once(httpx.SyncByteStream):
+    """A body that has not been read yet. Passing content= would read it immediately."""
+
+    def __init__(self, data: bytes) -> None:
+        self._data = data
+
+    def __iter__(self):
+        yield self._data
+
+
+def _streamed(status: int, payload: dict[str, object], *, key: str = "") -> httpx.Response:
+    headers = {"Authorization": f"Bearer {key}"} if key else None
+    return httpx.Response(status, headers=headers, stream=_Once(json.dumps(payload).encode()))
 
 
 def _transport(
@@ -593,6 +608,215 @@ def test_two_malformed_submissions_fail_the_scan(
     assert not (tmp_path / "codeguard.db").exists()
 
 
+_PROVIDER_ENV = (
+    "PROVIDER",
+    "USE_MOCK_AI",
+    "MODEL_API_KEY",
+    "MODEL_NAME",
+    "MODEL_BASE_URL",
+    "META_API_KEY",
+    "META_MODEL",
+    "META_BASE_URL",
+    "BASETEN_API_KEY",
+    "BASETEN_MODEL",
+    "BASETEN_BASE_URL",
+    "FIREWORKS_API_KEY",
+    "FIREWORKS_MODEL",
+    "FIREWORKS_BASE_URL",
+)
+
+
+def _provider_env(monkeypatch: pytest.MonkeyPatch, **overrides: str) -> None:
+    for name in _PROVIDER_ENV:
+        monkeypatch.setenv(name, overrides.get(name, ""))
+
+
+@pytest.mark.parametrize(
+    ("name", "model", "base", "key"),
+    [
+        ("meta", "meta-model", "http://meta.test/v1", "meta-secret-key-99"),
+        ("baseten", "baseten-model", "http://baseten.test/v1", "baseten-secret-key-99"),
+        ("fireworks", "fireworks-model", "http://fireworks.test/v1", "fireworks-secret-key-99"),
+    ],
+)
+def test_each_provider_posts_its_own_settings(
+    name: str,
+    model: str,
+    base: str,
+    key: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _provider_env(
+        monkeypatch,
+        PROVIDER="baseten",
+        USE_MOCK_AI="false",
+        MODEL_API_KEY="model-secret-key-99",
+        MODEL_NAME="fallback-model",
+        MODEL_BASE_URL="http://fallback.test/v1",
+        META_API_KEY="meta-secret-key-99",
+        META_MODEL="meta-model",
+        META_BASE_URL="http://meta.test/v1",
+        BASETEN_API_KEY="baseten-secret-key-99",
+        BASETEN_MODEL="baseten-model",
+        BASETEN_BASE_URL="http://baseten.test/v1",
+        FIREWORKS_API_KEY="fireworks-secret-key-99",
+        FIREWORKS_MODEL="fireworks-model",
+        FIREWORKS_BASE_URL="http://fireworks.test/v1",
+    )
+    seen: list[httpx.Request] = []
+    settings = load_settings(provider=name)
+    provider = LLMProvider(settings, transport=_transport([_ok(_submit({"cases": [_CASE]}))], seen))
+
+    provider.plan_tests([_finding()], _matrix())
+
+    assert len(seen) == 1
+    assert str(seen[0].url) == f"{base}/chat/completions"
+    assert seen[0].headers["authorization"] == f"Bearer {key}"
+    assert json.loads(seen[0].content)["model"] == model
+    summary = provider.model_run().text()
+    assert f"Provider: {name}" in summary
+    assert f"Model: {model}" in summary
+    built = get_provider(provider=name)
+    assert isinstance(built, LLMProvider)
+    assert f"Provider: {name}" in built.model_run().text()
+    assert f"Model: {model}" in built.model_run().text()
+    for secret in (
+        "meta-secret-key-99",
+        "baseten-secret-key-99",
+        "fireworks-secret-key-99",
+        "model-secret-key-99",
+    ):
+        assert secret not in summary
+        assert secret not in repr(settings)
+        assert secret not in str(settings)
+        assert secret not in repr(provider)
+        assert secret not in repr(built)
+
+
+def test_missing_provider_key_names_only_that_variable(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO)
+    _provider_env(
+        monkeypatch,
+        PROVIDER="fireworks",
+        USE_MOCK_AI="false",
+        FIREWORKS_MODEL="fireworks-model",
+        FIREWORKS_BASE_URL="http://fireworks.test/v1",
+        META_API_KEY="meta-secret-key-99",
+        MODEL_API_KEY="model-secret-key-99",
+    )
+
+    with pytest.raises(RuntimeError, match="FIREWORKS_API_KEY") as raised:
+        get_provider()
+
+    message = str(raised.value)
+    assert message.endswith("FIREWORKS_API_KEY")
+    assert "FIREWORKS_MODEL" not in message
+    assert "FIREWORKS_BASE_URL" not in message
+    assert "META_API_KEY" not in message
+    assert "MODEL_API_KEY" not in message
+    assert "meta-secret-key-99" not in message
+    assert "model-secret-key-99" not in message
+    assert "meta-secret-key-99" not in caplog.text
+    assert "model-secret-key-99" not in caplog.text
+
+
+def test_provider_key_stays_out_of_repr_logs_and_errors(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.DEBUG)
+    key = "meta-secret-key-99"
+    _provider_env(
+        monkeypatch,
+        PROVIDER="meta",
+        USE_MOCK_AI="false",
+        META_API_KEY=key,
+        META_MODEL="meta-model",
+        META_BASE_URL="http://meta.test/v1",
+        BASETEN_API_KEY="baseten-secret-key-99",
+    )
+    seen: list[httpx.Request] = []
+    failure = httpx.Response(500, json={"error": key, "other": "baseten-secret-key-99"})
+    settings = load_settings()
+    provider = LLMProvider(settings, transport=_transport([failure, failure, failure], seen))
+
+    with pytest.raises(RuntimeError, match="status 500") as raised:
+        provider.plan_tests([_finding()], _matrix())
+
+    assert seen[0].headers["authorization"] == f"Bearer {key}"
+    blob = str(raised.value) + caplog.text + repr(settings) + str(settings) + repr(provider)
+    assert key not in blob
+    assert "baseten-secret-key-99" not in blob
+
+
+def test_streamed_responses_are_read_before_the_body_is_used() -> None:
+    seen: list[httpx.Request] = []
+    plan_body = {"cases": [_CASE]}
+    payload = _reply("")
+    message = payload["choices"][0]["message"]
+    assert isinstance(message, dict)
+    message["tool_calls"] = [_function("submit_plan", plan_body)]
+    secret = "sk-supersecretvalue"
+    provider = _provider(
+        [
+            _streamed(200, payload, key=_KEY),
+            _streamed(429, {"error": _KEY, "leak": secret, "note": f"Authorization: Bearer {_KEY}"}, key=_KEY),
+            _streamed(500, {"error": _KEY, "leak": secret}, key=_KEY),
+            _streamed(500, {"error": _KEY, "leak": secret}, key=_KEY),
+            _streamed(500, {"error": _KEY, "leak": secret}, key=_KEY),
+        ],
+        seen,
+    )
+
+    plan = provider.plan_tests([_finding()], _matrix())
+    assert plan.cases[0].id == _CASE["id"]
+
+    with pytest.raises(RuntimeError, match="status 429") as rate_limited:
+        provider.plan_tests([_finding()], _matrix())
+    with pytest.raises(RuntimeError, match="status 500") as failed:
+        provider.plan_tests([_finding()], _matrix())
+
+    for message in (str(rate_limited.value), str(failed.value)):
+        assert "read()" not in message
+        assert "Attempted to access streaming response content" not in message
+        assert _KEY not in message
+        assert secret not in message
+        assert "Authorization" not in message
+
+
+def test_unset_provider_still_posts_to_the_model_settings(monkeypatch: pytest.MonkeyPatch) -> None:
+    _provider_env(
+        monkeypatch,
+        USE_MOCK_AI="false",
+        MODEL_API_KEY="model-secret-key-99",
+        MODEL_NAME="fallback-model",
+        MODEL_BASE_URL="http://fallback.test/v1",
+        META_API_KEY="meta-secret-key-99",
+        META_MODEL="meta-model",
+        META_BASE_URL="http://meta.test/v1",
+    )
+    seen: list[httpx.Request] = []
+    settings = load_settings()
+    provider = LLMProvider(settings, transport=_transport([_ok(_submit({"cases": [_CASE]}))], seen))
+
+    provider.plan_tests([_finding()], _matrix())
+
+    assert settings.provider == ""
+    assert str(seen[0].url) == "http://fallback.test/v1/chat/completions"
+    assert seen[0].headers["authorization"] == "Bearer model-secret-key-99"
+    assert json.loads(seen[0].content)["model"] == "fallback-model"
+    summary = provider.model_run().text()
+    assert "Provider: llm" in summary
+    assert "Model: fallback-model" in summary
+    assert "model-secret-key-99" not in summary
+    assert "meta-secret-key-99" not in summary
+    assert "model-secret-key-99" not in repr(settings)
+    assert "meta-secret-key-99" not in repr(settings)
+
+
 def test_no_suspected_route_skips_the_model() -> None:
     seen: list[httpx.Request] = []
     provider = _provider([_ok("should not be called")], seen)
@@ -601,3 +825,47 @@ def test_no_suspected_route_skips_the_model() -> None:
 
     assert plan.cases == []
     assert seen == []
+
+
+def test_two_flagged_routes_keep_the_old_limits() -> None:
+    assert planning_limits(2) == (6, 6)
+    seen: list[httpx.Request] = []
+    calls = [_function("list_routes", {}, f"call-{index}") for index in range(7)]
+    provider = _provider([_tools_reply(calls)], seen, request_cap=18)
+    findings = [_finding(path="/documents/{id}"), _finding(path="/notes/{id}")]
+
+    with pytest.raises(RuntimeError, match="tool call limit of 6 exceeded"):
+        provider.plan_tests(findings, _matrix())
+
+    summary = provider.model_run().text()
+    assert len(seen) == 1
+    assert "Tool call limit: 6" in summary
+    assert "Model turn limit: 6" in summary
+
+
+def test_four_flagged_routes_finish_within_scaled_limits() -> None:
+    assert planning_limits(4) == (8, 10)
+    seen: list[httpx.Request] = []
+    calls = [_function("list_routes", {}, f"call-{index}") for index in range(6)]
+    calls.append(_function("submit_plan", {"cases": [_CASE]}, "submit"))
+    provider = _provider([_tools_reply(calls)], seen, request_cap=18)
+    findings = [_finding(path=f"/items/{index}") for index in range(4)]
+
+    plan = provider.plan_tests(findings, _matrix())
+
+    assert plan.cases
+    summary = provider.model_run().text()
+    assert "Tool call limit: 8" in summary
+    assert "Model turn limit: 10" in summary
+    assert "tool call limit" not in summary.lower().split("tool call limit: 8")[-1]
+
+
+def test_tool_call_cap_is_never_above_16() -> None:
+    assert planning_limits(30) == (16, 18)
+    seen: list[httpx.Request] = []
+    calls = [_function("list_routes", {}, f"call-{index}") for index in range(17)]
+    provider = _provider([_tools_reply(calls)], seen, request_cap=18)
+    findings = [_finding(path=f"/items/{index}") for index in range(30)]
+
+    with pytest.raises(RuntimeError, match="tool call limit of 16 exceeded"):
+        provider.plan_tests(findings, _matrix())

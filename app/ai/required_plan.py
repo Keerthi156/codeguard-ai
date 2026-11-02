@@ -1,7 +1,8 @@
 """Deterministic checks added after a model plan has been validated.
 
 The model chooses extra cases. These checks are always present for every
-suspected route, so a scan does not depend on that choice.
+suspected route that names a resource id, so a scan does not depend on that choice.
+A collection route has no object to test, so it adds no exploit or control case.
 """
 
 from __future__ import annotations
@@ -9,6 +10,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 from app.analyzer.auth_checks import RouteFinding
+from app.analyzer.routes import is_collection_route
 from app.schemas import AuthorizationMatrix, Decision, OperationRules, TestCase
 from app.target_config import TargetConfig
 
@@ -25,7 +27,11 @@ def supplement_plan(
 
     The two counts are the accepted model cases and the size of the required set.
     """
-    model_cases = [case.model_copy(update={"source": "model"}) for case in accepted]
+    model_cases = [
+        case.model_copy(update={"source": "model"})
+        for case in accepted
+        if not is_collection_route(case.route)
+    ]
     present = {
         (case.method.upper(), case.route, case.identity, case.resource_id) for case in model_cases
     }
@@ -56,6 +62,8 @@ def _required_cases(
             continue
         method = finding.method.upper()
         route = finding.path
+        if is_collection_route(route):
+            continue
         if (method, route) in seen or method not in {"GET", "POST", "PUT", "PATCH", "DELETE"}:
             continue
         seen.add((method, route))

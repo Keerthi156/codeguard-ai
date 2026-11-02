@@ -8,13 +8,21 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from typing import Literal
 from urllib.parse import quote, urlsplit
 
 import httpx
 
+from app.runner.executor import (
+    CANNOT_RESET,
+    STATE_TAINTED,
+    ExecutionStats,
+    destructive_method_set,
+    resolve_reset,
+    resource_key,
+)
 from app.schemas import OperationRules
 from app.target_config import TargetConfig
 
@@ -165,11 +173,18 @@ def summarize(results: Sequence[VariantResult]) -> VariantReport:
             ),
         )
     if not results or any(item.classification == "inconclusive" for item in results):
+        bodies = [item.body for item in results if item.classification == "inconclusive"]
+        if any(body == STATE_TAINTED for body in bodies):
+            reason = STATE_TAINTED
+        elif bodies and all(body == CANNOT_RESET for body in bodies):
+            reason = CANNOT_RESET
+        else:
+            reason = "bypass check timed out or returned 5xx"
         return VariantReport(
             outcome="inconclusive",
             results=tuple(results),
             line=f"Bypass check: {len(results)} variants, inconclusive",
-            reason="bypass check timed out or returned 5xx",
+            reason=reason,
             model_feedback="",
         )
     return VariantReport(
@@ -187,22 +202,75 @@ async def execute_variants(
     *,
     transport: httpx.AsyncBaseTransport | None = None,
     timeout: float = 2.0,
+    reset: Callable[[], object] | None = None,
+    stats: ExecutionStats | None = None,
 ) -> list[VariantResult]:
-    """Send variants to ``config.base_url``. A non-localhost URL sends nothing."""
+    """Send variants to ``config.base_url``. A non-localhost URL sends nothing.
+
+    Destructive variants each run after a reset. Without a reset they are not sent.
+    """
     base = _localhost_base(config.base_url)
     urls = [_request_url(base, variant.path) for variant in variants]
     tokens = {user.name: user.token for user in config.users}
     token_values = [token for token in tokens.values() if token]
+    methods = destructive_method_set(config)
+    reset_fn = resolve_reset(config, reset)
+    counted = stats if stats is not None else ExecutionStats()
+    pairs = list(zip(variants, urls, strict=True))
+    ordered = [pair for pair in pairs if pair[0].method.upper() not in methods]
+    ordered.extend(pair for pair in pairs if pair[0].method.upper() in methods)
     results: list[VariantResult] = []
+    deleted: set[str] = set()
     async with httpx.AsyncClient(
         transport=transport,
         timeout=httpx.Timeout(timeout),
         trust_env=False,
         follow_redirects=False,
     ) as client:
-        for variant, url in zip(variants, urls, strict=True):
-            results.append(await _one(client, variant, url, tokens, token_values, timeout))
+        for variant, url in ordered:
+            destructive = variant.method.upper() in methods
+            if destructive:
+                if reset_fn is None or not await _call_reset(reset_fn):
+                    results.append(_skipped(variant, CANNOT_RESET))
+                    continue
+                counted.resets += 1
+                deleted = set()
+            result = await _one(client, variant, url, tokens, token_values, timeout)
+            key = resource_key(variant.path)
+            if key and key in deleted:
+                results.append(
+                    VariantResult(
+                        variant=variant,
+                        status_code=result.status_code,
+                        classification="inconclusive",
+                        body=STATE_TAINTED,
+                    )
+                )
+                continue
+            results.append(result)
+            if (
+                destructive
+                and result.classification == "bypass"
+                and result.status_code is not None
+                and 200 <= result.status_code < 300
+                and key
+            ):
+                deleted.add(key)
     return results
+
+
+async def _call_reset(reset: Callable[[], object]) -> bool:
+    try:
+        outcome = reset()
+        if isinstance(outcome, Awaitable):
+            await outcome
+    except Exception:
+        return False
+    return True
+
+
+def _skipped(variant: Variant, body: str) -> VariantResult:
+    return VariantResult(variant=variant, status_code=None, classification="inconclusive", body=body)
 
 
 def classify_status(status_code: int | None) -> Classification:

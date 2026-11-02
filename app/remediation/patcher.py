@@ -14,6 +14,7 @@ import logging
 import re
 import shutil
 import tempfile
+from collections import Counter
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Literal
@@ -22,7 +23,7 @@ import httpx
 from pydantic import BaseModel, ConfigDict
 
 from app.analyzer.auth_checks import RouteFinding
-from app.config import Settings, load_settings
+from app.config import Settings, credential_names, load_settings
 from app.findings.classifier import Finding
 from app.schemas import AuthorizationMatrix, OperationRules
 
@@ -31,6 +32,9 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 _MAX_CHANGED_LINES = 40
+_MAX_ROUTE_LINES = 8
+_FALLBACK_CALL = re.compile(r"\b(?:getattr|hasattr)\s*\(|\.model_dump\s*\(")
+_OWNER_WORD = re.compile(r"\bowner\b", re.IGNORECASE)
 _TIMEOUT_SECONDS = 60.0
 _MAX_TOKENS = 4000
 _FENCE = re.compile(r"^```[a-zA-Z0-9]*\s*|\s*```$", re.MULTILINE)
@@ -178,10 +182,10 @@ def _ask_model(
 ) -> dict[str, object]:
     missing = [
         name
-        for name, value in (
-            ("MODEL_API_KEY", settings.model_api_key),
-            ("MODEL_NAME", settings.model_name),
-            ("MODEL_BASE_URL", settings.model_base_url),
+        for name, value in zip(
+            credential_names(settings.provider),
+            (settings.model_api_key, settings.model_name, settings.model_base_url),
+            strict=True,
         )
         if not value.strip()
     ]
@@ -212,6 +216,10 @@ def _ask_model(
             with httpx.Client(transport=transport, timeout=_TIMEOUT_SECONDS, trust_env=False) as client:
                 response = client.post(url, headers=headers, json=body, follow_redirects=False)
         except httpx.HTTPError:
+            raise RuntimeError("model request failed") from None
+        try:
+            response.read()
+        except httpx.StreamError:
             raise RuntimeError("model request failed") from None
         if response.status_code != 200:
             raise RuntimeError(f"model request failed with status {response.status_code}")
@@ -295,6 +303,8 @@ def _checked_text(original: str, diff: str, relative: str) -> str:
     hunks, changed = _parse_diff(diff, relative)
     if changed > _MAX_CHANGED_LINES:
         raise PatchRejected(f"diff changes more than {_MAX_CHANGED_LINES} lines")
+    if changed > _MAX_ROUTE_LINES:
+        raise PatchRejected(f"diff changes more than {_MAX_ROUTE_LINES} lines")
     patched = _apply(original, hunks)
     try:
         original_tree = ast.parse(original)
@@ -311,6 +321,8 @@ def _checked_text(original: str, diff: str, relative: str) -> str:
     for name in _BANNED_CALLS:
         if after[name] > before[name]:
             raise PatchRejected(f"diff adds a call to {name}")
+    _reject_local_import(original_tree, patched_tree)
+    _reject_owner_fallback(_added_lines(diff))
     return patched
 
 
@@ -613,6 +625,13 @@ def _system_prompt() -> str:
         "edits is a list of objects with old and new. "
         "old is an exact snippet that appears once in that file, and new is its replacement. "
         "Do not write a unified diff. "
+        "Match the surrounding code style. "
+        "Use the plain minimal check, for example if doc.owner != _user: raise HTTPException(...). "
+        "Reuse names and imports already present in the file. "
+        "Do not add imports inside functions. "
+        "Do not add getattr, hasattr, or model_dump fallback chains. "
+        "Update any docstring that says ownership is not checked. "
+        "Change at most 8 lines for one route. "
         "Change at most 40 lines. "
         "Do not add imports of os, subprocess, socket, requests, or httpx. "
         "Do not call eval, exec, or open. Do not include commands. "
@@ -637,6 +656,56 @@ def _rule_view(rules: OperationRules) -> dict[str, str]:
     if rules.unauthenticated is not None:
         values["unauthenticated"] = rules.unauthenticated.expected
     return values
+
+
+def _added_lines(diff: str) -> list[str]:
+    lines: list[str] = []
+    for line in diff.splitlines():
+        if line.startswith(("+++", "---", "@@", "diff ", "index ")):
+            continue
+        if line.startswith("+"):
+            lines.append(line[1:])
+    return lines
+
+
+def _reject_local_import(original: ast.AST, patched: ast.AST) -> None:
+    before = Counter(_function_imports(original))
+    after = Counter(_function_imports(patched))
+    for name in sorted(after):
+        if after[name] > before[name]:
+            raise PatchRejected(f"diff adds an import inside a function: {name}")
+
+
+def _function_imports(tree: ast.AST) -> list[str]:
+    parents: dict[ast.AST, ast.AST] = {}
+    for node in ast.walk(tree):
+        for child in ast.iter_child_nodes(node):
+            parents[child] = node
+    names: list[str] = []
+    for node in ast.walk(tree):
+        if not _inside_function(node, parents):
+            continue
+        if isinstance(node, ast.Import):
+            names.extend(alias.name.split(".", 1)[0] for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            names.append(node.module.split(".", 1)[0] if node.module else "")
+    return names
+
+
+def _inside_function(node: ast.AST, parents: dict[ast.AST, ast.AST]) -> bool:
+    current = parents.get(node)
+    while current is not None:
+        if isinstance(current, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            return True
+        current = parents.get(current)
+    return False
+
+
+def _reject_owner_fallback(added: Sequence[str]) -> None:
+    text = "\n".join(added)
+    if _OWNER_WORD.search(text) is None or len(_FALLBACK_CALL.findall(text)) < 2:
+        return
+    raise PatchRejected("diff adds a getattr, hasattr, or model_dump fallback for the owner")
 
 
 def _import_roots(tree: ast.AST) -> set[str]:

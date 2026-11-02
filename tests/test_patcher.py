@@ -174,6 +174,109 @@ def test_diff_adding_subprocess_is_rejected(tmp_path: Path) -> None:
     assert (tmp_path / "api" / "app.py").read_text(encoding="utf-8") == _ORIGINAL
 
 
+_MINIMAL = (
+    "def get_document(user, document):\n"
+    "    if document.owner != user:\n"
+    "        raise HTTPException(status_code=403, detail='Forbidden')\n"
+    "    return document\n"
+)
+
+
+def test_plain_minimal_owner_check_passes(tmp_path: Path) -> None:
+    seen: list[httpx.Request] = []
+    root = _source(tmp_path)
+    proposal = propose_patch(
+        _finding(),
+        source_dir=root,
+        route_file="app.py",
+        handler_source=_ORIGINAL,
+        line_numbers=[1, 2],
+        matrix=_matrix(),
+        settings=_settings(),
+        transport=_transport(_payload(_ORIGINAL, _MINIMAL), seen),
+    )
+
+    copied = Path(proposal.temp_copy_path) / "app.py"
+    body = seen[0].content.decode()
+    assert copied.read_text(encoding="utf-8") == _MINIMAL
+    assert (root / "app.py").read_text(encoding="utf-8") == _ORIGINAL
+    assert "Match the surrounding code style." in body
+    assert "if doc.owner != _user: raise HTTPException(...)" in body
+    assert "Reuse names and imports already present in the file." in body
+    assert "Do not add imports inside functions." in body
+    assert "Do not add getattr, hasattr, or model_dump fallback chains." in body
+    assert "Update any docstring that says ownership is not checked." in body
+    assert "Change at most 8 lines for one route." in body
+    assert "Change at most 40 lines." in body
+    assert "Do not add imports of os, subprocess, socket, requests, or httpx." in body
+    assert "Do not call eval, exec, or open." in body
+
+
+def test_local_import_is_rejected_and_named_on_the_next_attempt(tmp_path: Path) -> None:
+    local = (
+        "def get_document(user, document):\n"
+        "    import hmac\n"
+        "    if document.owner != user:\n"
+        "        raise HTTPException(status_code=403, detail='Forbidden')\n"
+        "    return document\n"
+    )
+    seen: list[httpx.Request] = []
+    replies = [_payload(_ORIGINAL, local), _payload(_ORIGINAL, _MINIMAL)]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return _reply(replies.pop(0))
+
+    root = _source(tmp_path)
+    with pytest.raises(PatchRejected, match="diff adds an import inside a function: hmac") as raised:
+        propose_patch(
+            _finding(),
+            source_dir=root,
+            route_file="app.py",
+            handler_source=_ORIGINAL,
+            line_numbers=[1, 2],
+            matrix=_matrix(),
+            settings=_settings(),
+            transport=httpx.MockTransport(handler),
+        )
+    proposal = propose_patch(
+        _finding(),
+        source_dir=root,
+        route_file="app.py",
+        handler_source=_ORIGINAL,
+        line_numbers=[1, 2],
+        matrix=_matrix(),
+        settings=_settings(),
+        transport=httpx.MockTransport(handler),
+        feedback=str(raised.value),
+    )
+
+    assert proposal.status == "Fix proposed"
+    assert str(raised.value) in seen[1].content.decode()
+    assert (root / "app.py").read_text(encoding="utf-8") == _ORIGINAL
+
+
+def test_getattr_owner_chain_is_rejected(tmp_path: Path) -> None:
+    chained = (
+        "def get_document(user, document):\n"
+        "    owner = getattr(document, 'owner', None) or document.model_dump().get('owner')\n"
+        "    if owner != user:\n"
+        "        raise HTTPException(status_code=403, detail='Forbidden')\n"
+        "    return document\n"
+    )
+    with pytest.raises(PatchRejected, match="getattr, hasattr, or model_dump fallback for the owner"):
+        _propose(tmp_path, _ORIGINAL, chained)
+    assert (tmp_path / "api" / "app.py").read_text(encoding="utf-8") == _ORIGINAL
+
+
+def test_more_than_8_lines_for_one_route_is_rejected(tmp_path: Path) -> None:
+    added = "".join(f"    value_{index} = {index}\n" for index in range(9))
+    patched = "def get_document(user, document):\n" + added + "    return document\n"
+    with pytest.raises(PatchRejected, match="more than 8 lines"):
+        _propose(tmp_path, _ORIGINAL, patched)
+    assert (tmp_path / "api" / "app.py").read_text(encoding="utf-8") == _ORIGINAL
+
+
 def test_old_text_must_match_once(tmp_path: Path) -> None:
     missing = tmp_path / "missing"
     repeat = tmp_path / "repeat"

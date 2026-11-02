@@ -1,0 +1,242 @@
+{
+  "approval": "AUTO-APPROVED (measurement mode, temporary copies only)",
+  "commit": "56b40c45a5793e463dcb2d964310dc47c6ff61d1",
+  "date": "2026-10-30",
+  "provider": "baseten",
+  "model": "meta-models/muse-spark-open-1026",
+  "runs": 10,
+  "source_hash": "bd771e1d75ef3d9c5ba11f557f6cf3e3efd9093ad6db0a2247c4acc0e097a250",
+  "source_hash_unchanged": true,
+  "note": "Measured on the benchmark fixtures only; not a claim of real-world reliability.",
+  "findings": 20,
+  "verified_and_hardened_first_attempt": 20,
+  "verified_and_hardened_first_attempt_share": "20/20 (100%)",
+  "verified_and_hardened_after_repair": 0,
+  "verified_and_hardened_after_repair_share": "0/20 (0%)",
+  "not_verified_and_hardened": 0,
+  "not_verified_and_hardened_share": "0/20 (0%)",
+  "failure_reasons": {
+    "not JSON": 0,
+    "exploit still works": 0,
+    "owner control failed": 0,
+    "bypass found": 0
+  },
+  "tokens_mean": "11835.8",
+  "tokens_max": "13732",
+  "latency_mean_ms": "15732.9",
+  "valid_runs": 10,
+  "failed_runs": 0,
+  "all_runs_failed": false,
+  "latency_max_ms": "18703",
+  "style_flags": {
+    "import inside a function": 0,
+    "owner lookup fallback chain": 0,
+    "changes more than 8 lines": 0,
+    "docstring still says ownership is not checked": 0
+  },
+  "patches_with_a_style_flag": 0,
+  "patches": 20,
+  "flagged_patches": [],
+  "records": [
+    {
+      "tokens": 11833,
+      "latency_ms": 16527,
+      "source_hash_after": "bd771e1d75ef3d9c5ba11f557f6cf3e3efd9093ad6db0a2247c4acc0e097a250",
+      "error": "",
+      "findings": [
+        {
+          "route": "GET /documents/{id}",
+          "status": "Verified and Hardened",
+          "attempts": 1,
+          "failures": []
+        },
+        {
+          "route": "PUT /documents/{id}",
+          "status": "Verified and Hardened",
+          "attempts": 1,
+          "failures": []
+        }
+      ]
+    },
+    {
+      "tokens": 11687,
+      "latency_ms": 17060,
+      "source_hash_after": "bd771e1d75ef3d9c5ba11f557f6cf3e3efd9093ad6db0a2247c4acc0e097a250",
+      "error": "",
+      "findings": [
+        {
+          "route": "GET /documents/{id}",
+          "status": "Verified and Hardened",
+          "attempts": 1,
+          "failures": []
+        },
+        {
+          "route": "PUT /documents/{id}",
+          "status": "Verified and Hardened",
+          "attempts": 1,
+          "failures": []
+        }
+      ]
+    },
+    {
+      "tokens": 12308,
+      "latency_ms": 18138,
+      "source_hash_after": "bd771e1d75ef3d9c5ba11f557f6cf3e3efd9093ad6db0a2247c4acc0e097a250",
+      "error": "",
+      "findings": [
+        {
+          "route": "GET /documents/{id}",
+          "status": "Verified and Hardened",
+          "attempts": 1,
+          "failures": []
+        },
+        {
+          "route": "PUT /documents/{id}",
+          "status": "Verified and Hardened",
+          "attempts": 1,
+          "failures": []
+        }
+      ]
+    },
+    {
+      "tokens": 13732,
+      "latency_ms": 16911,
+      "source_hash_after": "bd771e1d75ef3d9c5ba11f557f6cf3e3efd9093ad6db0a2247c4acc0e097a250",
+      "error": "",
+      "findings": [
+        {
+          "route": "GET /documents/{id}",
+          "status": "Verified and Hardened",
+          "attempts": 1,
+          "failures": []
+        },
+        {
+          "route": "PUT /documents/{id}",
+          "status": "Verified and Hardened",
+          "attempts": 1,
+          "failures": []
+        }
+      ]
+    },
+    {
+      "tokens": 11539,
+      "latency_ms": 15567,
+      "source_hash_after": "bd771e1d75ef3d9c5ba11f557f6cf3e3efd9093ad6db0a2247c4acc0e097a250",
+      "error": "",
+      "findings": [
+        {
+          "route": "GET /documents/{id}",
+          "status": "Verified and Hardened",
+          "attempts": 1,
+          "failures": []
+        },
+        {
+          "route": "PUT /documents/{id}",
+          "status": "Verified and Hardened",
+          "attempts": 1,
+          "failures": []
+        }
+      ]
+    },
+    {
+      "tokens": 12628,
+      "latency_ms": 18703,
+      "source_hash_after": "bd771e1d75ef3d9c5ba11f557f6cf3e3efd9093ad6db0a2247c4acc0e097a250",
+      "error": "",
+      "findings": [
+        {
+          "route": "GET /documents/{id}",
+          "status": "Verified and Hardened",
+          "attempts": 1,
+          "failures": []
+        },
+        {
+          "route": "PUT /documents/{id}",
+          "status": "Verified and Hardened",
+          "attempts": 1,
+          "failures": []
+        }
+      ]
+    },
+    {
+      "tokens": 11943,
+      "latency_ms": 15791,
+      "source_hash_after": "bd771e1d75ef3d9c5ba11f557f6cf3e3efd9093ad6db0a2247c4acc0e097a250",
+      "error": "",
+      "findings": [
+        {
+          "route": "GET /documents/{id}",
+          "status": "Verified and Hardened",
+          "attempts": 1,
+          "failures": []
+        },
+        {
+          "route": "PUT /documents/{id}",
+          "status": "Verified and Hardened",
+          "attempts": 1,
+          "failures": []
+        }
+      ]
+    },
+    {
+      "tokens": 10213,
+      "latency_ms": 10942,
+      "source_hash_after": "bd771e1d75ef3d9c5ba11f557f6cf3e3efd9093ad6db0a2247c4acc0e097a250",
+      "error": "",
+      "findings": [
+        {
+          "route": "GET /documents/{id}",
+          "status": "Verified and Hardened",
+          "attempts": 1,
+          "failures": []
+        },
+        {
+          "route": "PUT /documents/{id}",
+          "status": "Verified and Hardened",
+          "attempts": 1,
+          "failures": []
+        }
+      ]
+    },
+    {
+      "tokens": 11646,
+      "latency_ms": 15156,
+      "source_hash_after": "bd771e1d75ef3d9c5ba11f557f6cf3e3efd9093ad6db0a2247c4acc0e097a250",
+      "error": "",
+      "findings": [
+        {
+          "route": "GET /documents/{id}",
+          "status": "Verified and Hardened",
+          "attempts": 1,
+          "failures": []
+        },
+        {
+          "route": "PUT /documents/{id}",
+          "status": "Verified and Hardened",
+          "attempts": 1,
+          "failures": []
+        }
+      ]
+    },
+    {
+      "tokens": 10829,
+      "latency_ms": 12534,
+      "source_hash_after": "bd771e1d75ef3d9c5ba11f557f6cf3e3efd9093ad6db0a2247c4acc0e097a250",
+      "error": "",
+      "findings": [
+        {
+          "route": "GET /documents/{id}",
+          "status": "Verified and Hardened",
+          "attempts": 1,
+          "failures": []
+        },
+        {
+          "route": "PUT /documents/{id}",
+          "status": "Verified and Hardened",
+          "attempts": 1,
+          "failures": []
+        }
+      ]
+    }
+  ]
+}

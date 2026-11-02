@@ -2,9 +2,9 @@
 # Finding: put-documents-id
 # Route: PUT /documents/{id}
 # Operation: write
-# Date: 2026-10-29
-# Revision: d7f85ab829493a3e48daace28cd9f2a006c89596
-# Root cause: Handler authenticated via require_user but performed no authorization: it fetched the document and immediately applied the update without verifying document.owner == authenticated user, allowing any valid user to overwrite any document (IDOR). This violates write matrix non_owner: deny.
+# Date: 2026-11-02
+# Revision: fbf687991ecf6456b626e3a039a33deaebd16492
+# Root cause: Missing object-level authorization on PUT /documents/{id}; handler loaded any document by id and applied updates without verifying the authenticated user owns it, allowing non-owners to write.
 # Policy assumption: write access is owner allow, non-owner deny, unauthenticated deny.
 # Tokens and the base URL come from the environment. This file has no keys.
 # Requests are refused unless the base URL is http://127.0.0.1 or http://localhost.

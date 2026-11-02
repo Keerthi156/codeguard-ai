@@ -24,8 +24,9 @@ import yaml
 
 from app.findings.classifier import Finding, git_revision
 from app.findings.store import FindingStore
+from app.runner.executor import destructive_method_set
 from app.schemas import OperationRules
-from app.target_config import TargetConfig, load_target_config
+from app.target_config import TargetConfig, load_target_config, resolve_source_dir
 
 _READY_TIMEOUT_SECONDS = 30.0
 _STOP_TIMEOUT_SECONDS = 5.0
@@ -110,7 +111,7 @@ def run_regress(
     log_path: Path | None = None
     try:
         process, log_path, base_url = _start(config, directory)
-        return _run_saved_tests(config, records, base_url)
+        return _run_saved_tests(config, records, base_url, directory)
     except RegressionUsage as exc:
         print(str(exc), file=sys.stderr)
         return 2
@@ -188,6 +189,7 @@ def _render(
     rules: OperationRules,
 ) -> str:
     cases = _cases(finding, config, rules)
+    destructive = finding.method.upper() in destructive_method_set(config)
     header = [
         "# Regression test for a verified authorization fix.",
         f"# Finding: {finding.id}",
@@ -205,11 +207,13 @@ def _render(
         "from __future__ import annotations",
         "",
         "import os",
+        *(["import importlib"] if destructive else []),
         "from collections.abc import Iterator",
         "from urllib.parse import urlsplit",
         "",
         "import httpx",
         "import pytest",
+        *(["from starlette.testclient import TestClient"] if destructive else []),
         "",
         "_ALLOWED = {'127.0.0.1', 'localhost'}",
         "_WRITE = {'POST', 'PUT', 'PATCH'}",
@@ -229,15 +233,7 @@ def _render(
         "    return os.environ[f'CODEGUARD_TOKEN_{name.upper()}']",
         "",
         "",
-        "@pytest.fixture",
-        "def client() -> Iterator[httpx.Client]:",
-        "    with httpx.Client(",
-        "        base_url=_base_url(),",
-        "        trust_env=False,",
-        "        timeout=5.0,",
-        "        follow_redirects=False,",
-        "    ) as http:",
-        "        yield http",
+        *_client_fixture(destructive),
         "",
         "",
         "def _request(http: httpx.Client, method: str, path: str, identity: str | None) -> httpx.Response:",
@@ -256,6 +252,39 @@ def _render(
             ]
         )
     return "\n".join(header + body) + "\n"
+
+
+def _client_fixture(destructive: bool) -> list[str]:
+    """Shared client for reads and writes. Destructive routes get a new app each test."""
+    if not destructive:
+        return [
+            "@pytest.fixture",
+            "def client() -> Iterator[httpx.Client]:",
+            "    with httpx.Client(",
+            "        base_url=_base_url(),",
+            "        trust_env=False,",
+            "        timeout=5.0,",
+            "        follow_redirects=False,",
+            "    ) as http:",
+            "        yield http",
+        ]
+    return [
+        "def _fresh_app() -> object:",
+        "    spec = os.environ.get('CODEGUARD_TARGET_APP', '')",
+        "    module_name, _, attribute = spec.partition(':')",
+        "    if not module_name or not attribute:",
+        "        pytest.fail('CODEGUARD_TARGET_APP must be a module:attribute import path')",
+        "    module = importlib.import_module(module_name)",
+        "    module = importlib.reload(module)",
+        "    return getattr(module, attribute)",
+        "",
+        "",
+        "@pytest.fixture",
+        "def client() -> Iterator[httpx.Client]:",
+        "    _base_url()",
+        "    with TestClient(_fresh_app(), base_url='http://127.0.0.1') as http:",
+        "        yield http",
+    ]
 
 
 def _assertion(expected: str) -> str:
@@ -282,15 +311,13 @@ def _load_config(config_path: str) -> TargetConfig:
 
 
 def _resolve_source(config: TargetConfig, config_path: str, source_dir: str | None) -> Path:
-    raw = Path(source_dir) if source_dir else Path(config.source_dir or "")
-    if not str(raw):
+    chosen = source_dir if source_dir else config.source_dir
+    if not chosen:
         raise RegressionUsage("config error: source_dir is required")
-    if not raw.is_absolute():
-        candidates = [Path.cwd() / raw, Path(config_path).resolve().parent / raw]
-        raw = next((candidate for candidate in candidates if candidate.is_dir()), raw)
-    if not raw.is_dir():
-        raise RegressionUsage("config error: source_dir is not a directory")
-    return raw
+    try:
+        return resolve_source_dir(chosen, Path(config_path))
+    except ValueError as exc:
+        raise RegressionUsage(f"config error: {exc}") from exc
 
 
 def _start(config: TargetConfig, source_dir: Path) -> tuple[subprocess.Popen[bytes], Path, str]:
@@ -386,12 +413,25 @@ def _stop(process: subprocess.Popen[bytes] | None, log_path: Path | None) -> Non
             time.sleep(0.1)
 
 
-def _run_saved_tests(config: TargetConfig, records: list[object], base_url: str) -> int:
+def _run_saved_tests(
+    config: TargetConfig,
+    records: list[object],
+    base_url: str,
+    source_dir: Path | None = None,
+) -> int:
     files = [Path(row["file_path"]) for row in records]
     directory = files[0].parent
     xml_path = Path(tempfile.gettempdir()) / f"codeguard-regress-{os.getpid()}.xml"
     child = os.environ.copy()
     child["CODEGUARD_BASE_URL"] = base_url
+    if source_dir is not None and config.target_app:
+        try:
+            target, app_root = _app_target(config.target_app, source_dir)
+        except RegressionUsage:
+            target, app_root = config.target_app, source_dir
+        child["CODEGUARD_TARGET_APP"] = target
+        prior = child.get("PYTHONPATH", "")
+        child["PYTHONPATH"] = str(app_root) + (os.pathsep + prior if prior else "")
     for user in config.users:
         child[f"CODEGUARD_TOKEN_{user.name.upper()}"] = user.token
     completed = subprocess.run(

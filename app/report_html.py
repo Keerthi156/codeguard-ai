@@ -13,7 +13,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-from app.findings.classifier import Finding, evidence_line
+from app.findings.classifier import COLLECTION_STATUS, Finding, evidence_line
 from app.findings.store import FindingStore
 from app.runner.executor import Evidence
 
@@ -86,10 +86,12 @@ def _page(
     regressions: dict[str, object],
 ) -> str:
     confirmed = sum(1 for finding in findings if finding.status in _CONFIRMED)
+    not_applicable = sum(1 for finding in findings if finding.status == "Not applicable")
     hardened = sum(1 for finding in findings if _is_hardened(finding, attempts.get(finding.id, [])))
     saved = sum(1 for finding in findings if finding.id in regressions)
+    applicable = f", {not_applicable} not applicable" if not_applicable else ""
     summary = (
-        f"{len(findings)} routes scanned, {confirmed} confirmed, "
+        f"{len(findings)} routes scanned, {confirmed} confirmed{applicable}, "
         f"{hardened} verified and hardened, {saved} regression tests saved"
     )
     finding_cards = "".join(
@@ -484,6 +486,8 @@ def _badge(finding: Finding, rows: list[dict[str, object]]) -> tuple[str, str]:
         return "Inconclusive", "wait"
     if status == "Confirmed":
         return status, "bad"
+    if status == "Not applicable":
+        return COLLECTION_STATUS, "plain"
     return status, "plain"
 
 

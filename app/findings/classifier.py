@@ -18,7 +18,8 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.analyzer.auth_checks import RouteFinding
-from app.runner.executor import Evidence, TestResult
+from app.analyzer.routes import is_collection_route
+from app.runner.executor import CANNOT_RESET, STATE_TAINTED, Evidence, TestResult, apply_state_taint
 from app.schemas import AuthorizationMatrix, Resource
 
 FindingStatus = Literal[
@@ -28,7 +29,10 @@ FindingStatus = Literal[
     "Verification failed",
     "Verified",
     "Inconclusive",
+    "Not applicable",
 ]
+COLLECTION_STATUS = "Not applicable: collection route (no resource id)"
+RESTART_TIMEOUT_STATUS = "Inconclusive: target restart timed out"
 _UNAUTHENTICATED = frozenset({"unauthenticated", "anonymous"})
 _READ_METHODS = frozenset({"GET", "HEAD"})
 _PLACEHOLDER = re.compile(r"\{[A-Za-z_][A-Za-z0-9_]*\}")
@@ -67,15 +71,23 @@ def classify(
     route_findings: Sequence[RouteFinding],
     test_results: Sequence[TestResult],
     matrix: AuthorizationMatrix,
+    *,
+    destructive_methods: Sequence[str] | None = None,
 ) -> list[Finding]:
     """Classify each route using the matrix and the executed tests."""
     created_at = datetime.now(timezone.utc)
     revision = git_revision()
     tokens = [user.token for user in matrix.users if user.token]
+    safe_results = apply_state_taint(test_results, destructive_methods)
+    methods = frozenset(item.upper() for item in (destructive_methods or ("DELETE",)))
     findings: list[Finding] = []
     for group in _groups(route_findings):
-        matched = _results_for_route(group, test_results, matrix)
-        decision = _decide(group, matched, matrix)
+        matched = _results_for_route(group, safe_results, matrix)
+        if is_collection_route(group.route):
+            decision = ("Not applicable", COLLECTION_STATUS, [])
+            matched = []
+        else:
+            decision = _decide(group, matched, matrix, methods)
         if decision is None:
             continue
         status, reason, gaps = decision
@@ -148,7 +160,11 @@ def _decide(
     group: _RouteGroup,
     results: Sequence[TestResult],
     matrix: AuthorizationMatrix,
+    destructive: frozenset[str],
 ) -> tuple[FindingStatus, str, list[str]] | None:
+    restart_timeout = _restart_timeout_reason(group, results, destructive)
+    if restart_timeout is not None:
+        return ("Inconclusive", restart_timeout, [])
     users = {user.name for user in matrix.users}
     rules = matrix.read if group.method in _READ_METHODS else matrix.write
     owner_passed = False
@@ -187,7 +203,10 @@ def _decide(
     if owner_blocked:
         return (
             "Inconclusive",
-            "The owner control test failed or was inconclusive, so this route is Inconclusive.",
+            _specific_reason(
+                results,
+                "The owner control test failed or was inconclusive, so this route is Inconclusive.",
+            ),
             [],
         )
     if reproduced and owner_passed:
@@ -198,12 +217,39 @@ def _decide(
             _unique(gaps),
         )
     if not reproduced and needed_inconclusive:
-        return "Inconclusive", "A needed test was inconclusive, so this route is Inconclusive.", []
+        return (
+            "Inconclusive",
+            _specific_reason(results, "A needed test was inconclusive, so this route is Inconclusive."),
+            [],
+        )
     if group.suspected and denied_correctly and not reproduced:
         return "Suspected", "Suspected, not reproduced", []
     if group.suspected:
         return "Suspected", group.static_reason or "Static heuristics marked this route Suspected.", []
     return None
+
+
+def _restart_timeout_reason(
+    group: _RouteGroup,
+    results: Sequence[TestResult],
+    destructive: frozenset[str],
+) -> str | None:
+    """Every request on a destructive route timed out after its restart."""
+    if group.method not in destructive or not results:
+        return None
+    if not all(item.evidence.body == "timeout" for item in results):
+        return None
+    count = len(results)
+    noun = "restart" if count == 1 else "restarts"
+    return f"{RESTART_TIMEOUT_STATUS} ({count} {noun})"
+
+
+def _specific_reason(results: Sequence[TestResult], fallback: str) -> str:
+    """Keep the session-taint and missing-reset reasons when they caused this status."""
+    for result in results:
+        if result.outcome == "inconclusive" and result.evidence.body in {CANNOT_RESET, STATE_TAINTED}:
+            return result.evidence.body
+    return fallback
 
 
 def _condition(identity: str, owner: str, users: set[str]) -> str | None:
