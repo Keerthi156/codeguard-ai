@@ -167,6 +167,7 @@ async def execute_plan(
     shared = [test for test in runnable if test.method.upper() not in methods]
     isolated = [test for test in runnable if test.method.upper() in methods]
     results: list[TestResult] = []
+    seen: dict[tuple[str, str, str], TestResult] = {}
     async with httpx.AsyncClient(
         transport=transport,
         base_url=base_url,
@@ -175,10 +176,19 @@ async def execute_plan(
         follow_redirects=False,
     ) as client:
         for test in shared:
+            reused = _reuse(seen, test, base_url, 0)
+            if reused is not None:
+                results.append(reused)
+                continue
             result = await _execute_one(client, test, base_url, tokens, token_values, limit)
-            results.append(result.model_copy(update={"session": 0}))
+            results.append(_store(seen, test, base_url, result.model_copy(update={"session": 0})))
         session = 0
         for test in isolated:
+            reused = _reuse(seen, test, base_url, session + 1)
+            if reused is not None:
+                session += 1
+                results.append(reused)
+                continue
             if reset_fn is None:
                 results.append(_inconclusive(test, None, CANNOT_RESET, token_values))
                 continue
@@ -190,8 +200,39 @@ async def execute_plan(
             current = _require_localhost(config.base_url)
             client.base_url = current
             result = await _execute_one(client, test, current, tokens, token_values, limit)
-            results.append(result.model_copy(update={"session": session}))
+            results.append(_store(seen, test, base_url, result.model_copy(update={"session": session})))
     return apply_state_taint(results, methods)
+
+
+def _request_key(test: TestCase, base_url: str) -> tuple[str, str, str]:
+    """Method, path, and caller. A refused URL never matches a request that was sent."""
+    try:
+        path = _local_path(test.route, test.resource_id, base_url)
+    except _Refused:
+        path = f"refused:{test.route}:{test.resource_id}"
+    return test.method.upper(), path, test.identity
+
+
+def _reuse(
+    seen: dict[tuple[str, str, str], TestResult],
+    test: TestCase,
+    base_url: str,
+    session: int,
+) -> TestResult | None:
+    prior = seen.get(_request_key(test, base_url))
+    if prior is None:
+        return None
+    return prior.model_copy(update={"test_id": test.id, "session": session})
+
+
+def _store(
+    seen: dict[tuple[str, str, str], TestResult],
+    test: TestCase,
+    base_url: str,
+    result: TestResult,
+) -> TestResult:
+    seen.setdefault(_request_key(test, base_url), result)
+    return result
 
 
 async def _call_reset(reset: Callable[[], object]) -> bool:

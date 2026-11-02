@@ -28,8 +28,7 @@ import yaml
 from app.ai.factory import get_provider
 from app.ai.required_plan import supplement_plan
 from app.ai.validator import validate_plan
-from app.analyzer.auth_checks import assess_routes
-from app.analyzer.routes import discover_routes
+from app.analyzer.auth_checks import analyze_target
 from app.config import Settings, load_settings
 from app.findings.classifier import Finding, classify
 from app.findings.store import FindingStore
@@ -146,8 +145,7 @@ def _run(
     config = _load_config(config_path)
     tokens = [user.token for user in config.users]
     source_dir = _source_directory(config, Path(config_path))
-    routes = discover_routes(source_dir)
-    route_findings = assess_routes(source_dir)
+    routes, route_findings = analyze_target(source_dir)
     try:
         if provider is not None:
             selected = load_settings(provider=provider)

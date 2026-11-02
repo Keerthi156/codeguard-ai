@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from app.analyzer.auth_checks import _module_for, assess_routes
+from app.analyzer.auth_checks import _module_for, analyze_target, assess_routes
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -235,6 +235,16 @@ def test_unresolvable_dependencies_are_reported_and_do_not_crash(tmp_path: Path)
     assert "Unresolved dependency gone." in by_name["read_missing_module"].reason
     assert "Unresolved dependency Depends." in by_name["health"].reason
     assert "proof. Authentication and a path parameter" in by_name["health"].reason
+
+
+def test_analyze_target_reads_routes_and_findings_together() -> None:
+    routes, findings = analyze_target(ROOT / "fixtures" / "vulnerable_api")
+
+    assert [(route.method, route.path) for route in routes] == [
+        ("GET", "/documents/{id}"),
+        ("PUT", "/documents/{id}"),
+    ]
+    assert [item.status for item in findings] == ["Suspected", "Suspected"]
 
 
 def test_syntax_error_in_a_dependency_file_does_not_crash(tmp_path: Path) -> None:

@@ -38,8 +38,7 @@ from app.ai.factory import get_provider
 from app.ai.required_plan import supplement_plan
 from app.ai.model_run import ModelRun
 from app.ai.validator import validate_plan
-from app.analyzer.auth_checks import assess_routes
-from app.analyzer.routes import discover_routes
+from app.analyzer.auth_checks import analyze_target
 from app.findings.classifier import COLLECTION_STATUS, RESTART_TIMEOUT_STATUS, Finding, classify, evidence_line
 from app.findings.store import DEFAULT_DB_PATH, FindingStore
 from app.runner.executor import ExecutionStats, destructive_method_set, execute_plan
@@ -313,8 +312,7 @@ def _scan(
     tokens = [user.token for user in config.users]
     _assert_localhost(config.base_url)
     source_dir = _source_directory(config, Path(config_path))
-    routes = discover_routes(source_dir)
-    route_findings = assess_routes(source_dir)
+    routes, route_findings = analyze_target(source_dir)
     try:
         provider = get_provider() if provider_name is None else get_provider(provider=provider_name)
     except (RuntimeError, ValueError) as exc:

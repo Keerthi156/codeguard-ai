@@ -180,6 +180,21 @@ async def test_unauthenticated_identity_sends_no_authorization_header() -> None:
     assert f"{results[0].evidence.method} {results[0].evidence.path}" == "GET /documents/101"
 
 
+async def test_identical_get_is_sent_once() -> None:
+    _reset(vulnerable_api)
+    config = _config("vulnerable")
+    case = _plan("vulnerable", config)[0]
+    duplicate = case.model_copy(update={"id": "same-request"})
+    transport = _CountingTransport(vulnerable_api.app)
+
+    results = await execute_plan([case, duplicate], config, transport=transport)
+
+    assert transport.calls == 1
+    assert [item.test_id for item in results] == [case.id, "same-request"]
+    assert results[0].status_code == results[1].status_code
+    assert results[0].evidence.path == results[1].evidence.path
+
+
 def _assert_result_is_sanitized(case: TestCase, result: TestResult, config: TargetConfig) -> None:
     assert result.test_id == case.id
     assert result.evidence.method == case.method

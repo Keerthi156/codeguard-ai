@@ -166,6 +166,34 @@ async def test_vulnerable_delete_is_confirmed_and_records_resets() -> None:
     assert "Resets: 2" in summary.text()
 
 
+async def test_repeated_delete_reuses_the_first_result() -> None:
+    app, _resets = _app(secure=False)
+    config = _config()
+    stats = ExecutionStats()
+    calls = {"n": 0}
+
+    class _Counting(httpx.ASGITransport):
+        async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+            calls["n"] += 1
+            return await super().handle_async_request(request)
+
+    first = _case("control", "alice", "allow")
+    again = first.model_copy(update={"id": "control-again"})
+    results = await execute_plan(
+        [first, again],
+        config,
+        transport=_Counting(app),
+        reset=app.state.restore,
+        stats=stats,
+    )
+
+    assert stats.resets == 1
+    assert calls["n"] == 1
+    assert [item.test_id for item in results] == ["control", "control-again"]
+    assert results[0].status_code == results[1].status_code == 200
+    assert [item.session for item in results] == [1, 2]
+
+
 async def test_secure_delete_has_no_confirmed_finding() -> None:
     app, _resets = _app(secure=True)
     config = _config()

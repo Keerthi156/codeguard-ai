@@ -24,8 +24,7 @@ from app.ai.model_run import ModelRun
 from app.config import load_settings
 from app.ai.required_plan import supplement_plan
 from app.ai.validator import validate_plan
-from app.analyzer.auth_checks import assess_routes
-from app.analyzer.routes import discover_routes
+from app.analyzer.auth_checks import analyze_target
 from app.analyzer.routes import is_collection_route
 from app.findings.classifier import COLLECTION_STATUS, RESTART_TIMEOUT_STATUS, classify, git_revision
 from app.runner.executor import ExecutionStats, destructive_method_set, execute_plan
@@ -673,9 +672,8 @@ def _measure_once(
         config = load_target_config(app.config)
         tokens.update(user.token for user in config.users if user.token)
         source_dir = cli_module._source_directory(config, Path(app.config))
-        routes = discover_routes(source_dir)
+        routes, route_findings = analyze_target(source_dir)
         discovered = len(routes)
-        route_findings = assess_routes(source_dir)
         if no_model_tests:
             required_cases, _model_tests, required_tests = supplement_plan(
                 (),

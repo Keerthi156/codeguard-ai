@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import ast
 import re
+from dataclasses import dataclass
 from pathlib import Path
 
 from pydantic import BaseModel
@@ -34,15 +35,32 @@ class DiscoveredRoute(BaseModel):
     source: str
 
 
-def discover_routes(directory: str | Path) -> list[DiscoveredRoute]:
-    """Return routes declared under ``directory``, in file and source order."""
+@dataclass
+class SourceFile:
+    """One target file read and parsed a single time."""
+
+    relative: str
+    tree: ast.Module
+    routes: list[DiscoveredRoute]
+
+
+def load_source(directory: str | Path) -> list[SourceFile]:
+    """Read and parse each Python file under ``directory`` once."""
     root = Path(directory)
     if not root.is_dir():
         raise NotADirectoryError(str(root))
-    found: list[DiscoveredRoute] = []
+    loaded: list[SourceFile] = []
     for path in _python_files(root):
-        found.extend(_discover_file(path, root))
-    return found
+        source = path.read_text(encoding="utf-8")
+        tree = ast.parse(source, filename=str(path))
+        relative = path.relative_to(root).as_posix()
+        loaded.append(SourceFile(relative, tree, _discover_file(path, root, source, tree)))
+    return loaded
+
+
+def discover_routes(directory: str | Path) -> list[DiscoveredRoute]:
+    """Return routes declared under ``directory``, in file and source order."""
+    return [route for item in load_source(directory) for route in item.routes]
 
 
 def _python_files(root: Path) -> list[Path]:
@@ -51,9 +69,12 @@ def _python_files(root: Path) -> list[Path]:
     )
 
 
-def _discover_file(path: Path, root: Path) -> list[DiscoveredRoute]:
-    source = path.read_text(encoding="utf-8")
-    tree = ast.parse(source, filename=str(path))
+def _discover_file(
+    path: Path,
+    root: Path,
+    source: str,
+    tree: ast.Module,
+) -> list[DiscoveredRoute]:
     prefixes = _router_prefixes(tree)
     relative = path.relative_to(root).as_posix()
     routes: list[DiscoveredRoute] = []

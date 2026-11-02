@@ -25,7 +25,7 @@ from app import cli as cli_module
 from app.ai.factory import get_provider
 from app.ai.required_plan import supplement_plan
 from app.ai.validator import validate_plan
-from app.analyzer.auth_checks import assess_routes
+from app.analyzer.auth_checks import analyze_target
 from app.analyzer.routes import discover_routes, is_collection_route
 from app.config import load_settings
 from app.findings.classifier import COLLECTION_STATUS, RESTART_TIMEOUT_STATUS, classify, git_revision
@@ -387,8 +387,7 @@ def _scan_app(
     tokens = {user.token for user in config.users if user.token}
     source_dir = cli_module._source_directory(config, app.config_path)
     with _app_file_tree(source_dir) as app_tree:
-        routes = discover_routes(app_tree)
-        route_findings = assess_routes(app_tree)
+        routes, route_findings = analyze_target(app_tree)
     planner = get_provider() if provider is None else get_provider(provider=provider)
     plan = planner.plan_tests(route_findings, config.matrix(), routes=routes, config=config)
     validated = validate_plan(plan, routes, config.matrix(), config)

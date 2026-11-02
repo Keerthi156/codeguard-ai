@@ -16,7 +16,7 @@ from typing import Literal
 
 from pydantic import BaseModel
 
-from app.analyzer.routes import DiscoveredRoute, discover_routes
+from app.analyzer.routes import DiscoveredRoute, load_source
 
 _Function = ast.FunctionDef | ast.AsyncFunctionDef
 _NOT_PROOF = "Heuristics are indicators, not proof."
@@ -53,9 +53,19 @@ class RouteFinding(BaseModel):
 
 def assess_routes(directory: str | Path) -> list[RouteFinding]:
     """Apply authorization heuristics to every route under ``directory``."""
+    _routes, findings = analyze_target(directory)
+    return findings
+
+
+def analyze_target(directory: str | Path) -> tuple[list[DiscoveredRoute], list[RouteFinding]]:
+    """Discover routes and assess them, reading each source file once."""
     root = Path(directory)
-    parsed: dict[str, _Module] = {}
-    return [_assess_route(root, route, parsed) for route in discover_routes(root)]
+    files = load_source(root)
+    parsed = {
+        item.relative: _module_from_tree(item.tree, root, item.relative) for item in files
+    }
+    routes = [route for item in files for route in item.routes]
+    return routes, [_assess_route(root, route, parsed) for route in routes]
 
 
 @dataclass
@@ -125,14 +135,18 @@ def _module_for(root: Path, relative: str, parsed: dict[str, _Module]) -> _Modul
         empty = _Module({}, {})
         parsed[relative] = empty
         return empty
+    module = _module_from_tree(tree, root, relative)
+    parsed[relative] = module
+    return module
+
+
+def _module_from_tree(tree: ast.AST, root: Path, relative: str) -> _Module:
     functions = {
         statement.name: statement
         for statement in tree.body
         if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef))
-    }
-    module = _Module(functions, _import_map(tree, root, relative))
-    parsed[relative] = module
-    return module
+    } if isinstance(tree, ast.Module) else {}
+    return _Module(functions, _import_map(tree, root, relative))
 
 
 def _import_map(tree: ast.AST, root: Path, relative: str) -> dict[str, tuple[str, str | None]]:
