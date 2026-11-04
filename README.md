@@ -4,6 +4,9 @@
 
 CodeGuard AI finds, proves, fixes, verifies, and regression-tests Broken Object Level Authorization (BOLA, OWASP API1) bugs in FastAPI apps. It is an entry for the Meta Global AI Developer Hackathon, Indie Developer track, theme "Push the Frontier" (software).
 
+## Demo
+[Watch the 3-minute CodeGuard AI demo](https://youtu.be/ZJ6QcFMy2j0)
+
 Models: Muse Spark 1.3 on the Meta Model API, and Muse Spark Open (`meta-models/muse-spark-open-1026`, open weights, served by Baseten). The agent reads the code through read-only tools, proposes the test plan and the patch, and repairs a failed fix up to twice. Deterministic code, not the model, decides Confirmed and Verified.
 
 Headline results, each measured on small local benchmarks (see the linked files):
